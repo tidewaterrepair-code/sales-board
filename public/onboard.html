@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Your Setup</title>
+  <style>
+    :root { --bg: #f5f7fb; --card: #fff; --text: #14183a; --muted: #5f6787; --line: #e1e5f0; --brand: #3a72e6; --green: #12a56c; color-scheme: light; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0b1026; --card: #18214a; --text: #eef1ff; --muted: #9aa6d6; --line: #2b3770; color-scheme: dark; } }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+    main { max-width: 640px; margin: 0 auto; padding: 2rem 16px 4rem; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 1.3rem; margin-bottom: 1rem; }
+    h1 { font-size: 1.6rem; margin: 0 0 .4rem; }
+    h2 { font-size: 1.15rem; margin: 0 0 .8rem; }
+    .muted { color: var(--muted); }
+    .field { display: flex; flex-direction: column; gap: .3rem; margin-bottom: 1rem; }
+    label { font-weight: 700; font-size: .95rem; }
+    .for { font-weight: 500; font-size: .8rem; color: var(--muted); }
+    input, textarea { font: inherit; color: inherit; padding: .8rem .9rem; border-radius: 12px; border: 1px solid var(--line); background: var(--bg); width: 100%; }
+    textarea { min-height: 96px; resize: vertical; }
+    input:focus, textarea:focus { outline: 2px solid var(--brand); outline-offset: 1px; }
+    .btn { display: block; width: 100%; text-align: center; padding: 1rem; border-radius: 14px; border: 0; font: inherit; font-weight: 800; font-size: 1.1rem; cursor: pointer; text-decoration: none; }
+    .btn.pay { background: var(--brand); color: #fff; }
+    .btn.go { background: var(--green); color: #fff; }
+    .btn:disabled { opacity: .5; }
+    .items { list-style: none; padding: 0; margin: 0; }
+    .items li { padding: .45rem 0; border-bottom: 1px solid var(--line); }
+    .items li:last-child { border: 0; }
+    .total { font-size: 1.1rem; margin-top: .6rem; }
+    .done { text-align: center; padding: 2.5rem 1rem; }
+    .done .big { font-size: 4rem; }
+    .err { color: #d6334f; font-weight: 700; }
+    .step { display: inline-block; background: var(--brand); color: #fff; border-radius: 99px; width: 1.7rem; height: 1.7rem; text-align: center; line-height: 1.7rem; font-weight: 800; margin-right: .4rem; font-size: .9rem; }
+  </style>
+</head>
+<body>
+  <main id="root"><p class="muted">Loading your setup…</p></main>
+  <script>
+  (function () {
+    const root = document.getElementById('root');
+    const token = location.pathname.split('/').filter(Boolean)[1];
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const money = (n) => '$' + Number(n || 0).toLocaleString('en-US');
+    const justPaid = new URLSearchParams(location.search).has('paid');
+
+    fetch(`/api/onboard/${encodeURIComponent(token)}`).then((r) => r.json().then((d) => ({ ok: r.ok, d }))).then(({ ok, d }) => {
+      if (!ok) { root.innerHTML = `<div class="card done"><div class="big">🔗</div><h1>Link not found</h1><p class="muted">${esc(d.error)}</p></div>`; return; }
+      document.title = `${d.business}: Setup`;
+      if (d.submitted && (d.paid || !d.paymentUrl)) return thanks(d);
+      const showPay = d.paymentUrl && !d.paid && !justPaid;
+      root.innerHTML = `
+        <div class="card">
+          <p class="muted" style="margin:0">${esc(d.companyName)}</p>
+          <h1>Welcome aboard, ${esc(d.contact.name || d.business)}! 🎉</h1>
+          <p class="muted">${esc(d.repName)} got everything started. Here's what you're getting:</p>
+          <ul class="items">${d.workflows.map((w) => `<li>${esc(w.emoji)} <b>${esc(w.name)}</b></li>`).join('')}</ul>
+          <div class="total"><b>${money(d.setupTotal)}</b> one-time setup${d.monthlyTotal ? ` + <b>${money(d.monthlyTotal)}</b>/month` : ''}</div>
+        </div>
+        ${showPay ? `<div class="card"><h2><span class="step">1</span>Secure your spot</h2><a class="btn pay" href="${esc(d.paymentUrl)}">💳 Pay setup fee securely</a><p class="muted" style="font-size:.85rem;margin-bottom:0">Payments are processed by Stripe.</p></div>` : ''}
+        ${justPaid || d.paid ? '<div class="card">✅ <b>Payment received. Thank you!</b></div>' : ''}
+        <form class="card" id="f">
+          <h2>${showPay ? '<span class="step">2</span>' : ''}Tell us a few details (about 3 minutes)</h2>
+          <div class="field"><label>Your name</label><input name="c_name" value="${esc(d.contact.name)}" required></div>
+          <div class="field"><label>Best email</label><input name="c_email" type="email" value="${esc(d.contact.email)}" required></div>
+          <div class="field"><label>Best cell number</label><input name="c_phone" type="tel" value="${esc(d.contact.phone)}" required></div>
+          ${d.fields.map((f) => `<div class="field"><label for="f_${esc(f.key)}">${esc(f.label)}${f.required ? ' *' : ''} <span class="for">(${esc(f.workflow)})</span></label>
+            ${f.type === 'textarea' ? `<textarea id="f_${esc(f.key)}" name="${esc(f.key)}" ${f.required ? 'required' : ''} placeholder="${esc(f.placeholder || '')}">${esc(f.value)}</textarea>`
+            : `<input id="f_${esc(f.key)}" name="${esc(f.key)}" type="${esc(f.type === 'number' ? 'number' : f.type === 'email' ? 'email' : f.type === 'tel' ? 'tel' : f.type === 'url' ? 'url' : 'text')}" value="${esc(f.value)}" ${f.required ? 'required' : ''} placeholder="${esc(f.placeholder || '')}">`}</div>`).join('')}
+          <p class="err" id="err"></p>
+          <button class="btn go" id="sub">✅ Submit. We'll take it from here</button>
+        </form>`;
+      document.getElementById('f').addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const fd = new FormData(e.target);
+        const contact = { name: fd.get('c_name'), email: fd.get('c_email'), phone: fd.get('c_phone') };
+        const answers = {};
+        for (const [k, v] of fd.entries()) if (!k.startsWith('c_')) answers[k] = v;
+        const btn = document.getElementById('sub');
+        btn.disabled = true; btn.textContent = 'Sending…';
+        try {
+          const r = await fetch(`/api/onboard/${encodeURIComponent(token)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ answers, contact }) });
+          const out = await r.json();
+          if (!r.ok) throw new Error(out.error || 'Something went wrong');
+          thanks(d, showPay);
+        } catch (err) {
+          document.getElementById('err').textContent = err.message;
+          btn.disabled = false; btn.textContent = '✅ Submit. We\'ll take it from here';
+        }
+      });
+    }).catch(() => { root.innerHTML = '<div class="card done"><h1>Connection problem</h1><p class="muted">Please refresh the page.</p></div>'; });
+
+    function thanks(d, stillNeedsPay) {
+      root.innerHTML = `<div class="card done"><div class="big">🎉</div><h1>You're all set!</h1>
+        <p class="muted">Our team is building your ${d.workflows.length > 1 ? 'workflows' : 'workflow'} now. We'll reach out within one business day.</p>
+        ${stillNeedsPay && d.paymentUrl ? `<a class="btn pay" href="${esc(d.paymentUrl)}">💳 One last step: pay setup fee</a>` : ''}</div>`;
+    }
+  })();
+  </script>
+</body>
+</html>
