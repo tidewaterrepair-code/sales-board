@@ -56,7 +56,8 @@
           <h1>Welcome aboard, ${esc(d.contact.name || d.business)}! 🎉</h1>
           <p class="muted">${esc(d.repName)} got everything started. Here's what you're getting:</p>
           <ul class="items">${d.workflows.map((w) => `<li>${esc(w.emoji)} <b>${esc(w.name)}</b></li>`).join('')}</ul>
-          <div class="total"><b>${money(d.setupTotal)}</b> one-time setup${d.monthlyTotal ? ` + <b>${money(d.monthlyTotal)}</b>/month` : ''}</div>
+          <div class="total"><b>${money(d.setupTotal)}</b> one-time setup${d.monthlyTotal ? (d.billing === 'yearly' ? ` + <b>${money(d.yearlyTotal)}</b>/year (2 months free)` : ` + <b>${money(d.monthlyTotal)}</b>/month`) : ''}</div>
+          ${d.refundPolicy ? `<p class="muted" style="font-size:.85rem;margin:.4rem 0 0">${esc(d.refundPolicy)}</p>` : ''}
         </div>
         ${showPay ? `<div class="card"><h2><span class="step">1</span>Secure your spot</h2><a class="btn pay" href="${esc(d.paymentUrl)}">💳 Pay setup fee securely</a><p class="muted" style="font-size:.85rem;margin-bottom:0">Payments are processed by Stripe.</p></div>` : ''}
         ${justPaid || d.paid ? '<div class="card">✅ <b>Payment received. Thank you!</b></div>' : ''}

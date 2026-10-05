@@ -114,31 +114,61 @@ function badgesFor(db, userId) {
   return BADGES.map((b) => ({ ...b, earned: earned.has(b.id) }));
 }
 
+// Leaderboard is computed in one pass over events/deals and memoized until
+// the next save (db.version) or the next minute, so polling stays cheap.
+const boardCaches = new WeakMap();
 function leaderboard(db, period = 'week', now = Date.now()) {
+  if (!boardCaches.has(db)) boardCaches.set(db, new Map());
+  const boardCache = boardCaches.get(db);
+  const key = `${db.version}|${period}|${Math.floor(now / 60000)}`;
+  const hit = boardCache.get(key);
+  if (hit) return hit.map((r) => ({ ...r }));
   const start = periodStart(period, now);
+  const per = new Map();
+  const bucket = (uid) => {
+    if (!per.has(uid)) per.set(uid, { points: 0, calls: 0, allTime: 0, deals: 0, setupRevenue: 0, commission: 0, any: false });
+    return per.get(uid);
+  };
+  for (const e of db.events) {
+    if (e.voided) continue;
+    const b = bucket(e.userId);
+    b.any = true;
+    b.allTime += e.points;
+    if (e.createdAt >= start) {
+      b.points += e.points;
+      if (CALL_TYPES.includes(e.type)) b.calls++;
+    }
+  }
+  for (const d of db.deals) {
+    if (d.status === 'cancelled' || d.createdAt < start) continue;
+    const b = bucket(d.repId);
+    b.deals++;
+    b.setupRevenue += d.setupTotal;
+    b.commission += d.commission;
+  }
   // Reps always show; managers only show once they've logged activity themselves.
-  const onBoard = (u) => u.active !== false && (u.role === 'rep' || db.events.some((e) => e.userId === u.id));
+  const onBoard = (u) => u.active !== false && (u.role === 'rep' || per.get(u.id)?.any);
   const rows = db.users.filter(onBoard).map((u) => {
-    const events = liveEvents(db.events).filter((e) => e.userId === u.id && e.createdAt >= start);
-    const deals = liveDeals(db.deals).filter((d) => d.repId === u.id && d.createdAt >= start);
-    const allTimePoints = liveEvents(db.events).filter((e) => e.userId === u.id).reduce((s, e) => s + e.points, 0);
+    const b = per.get(u.id) || bucket(u.id);
     return {
       userId: u.id,
       name: u.name,
       avatar: u.avatar,
       color: u.color,
-      points: events.reduce((s, e) => s + e.points, 0),
-      calls: events.filter((e) => CALL_TYPES.includes(e.type)).length,
-      deals: deals.length,
-      setupRevenue: deals.reduce((s, d) => s + d.setupTotal, 0),
-      commission: round2(deals.reduce((s, d) => s + d.commission, 0)),
-      level: levelFor(allTimePoints),
+      points: b.points,
+      calls: b.calls,
+      deals: b.deals,
+      setupRevenue: b.setupRevenue,
+      commission: round2(b.commission),
+      level: levelFor(b.allTime),
       streak: streakFor(db.events, u.id, now),
     };
   });
   rows.sort((a, b) => b.points - a.points || b.commission - a.commission || a.name.localeCompare(b.name));
   rows.forEach((r, i) => { r.rank = i + 1; });
-  return rows;
+  if (boardCache.size > 50) boardCache.clear();
+  boardCache.set(key, rows);
+  return rows.map((r) => ({ ...r }));
 }
 
 function repStats(db, userId, settings, now = Date.now()) {

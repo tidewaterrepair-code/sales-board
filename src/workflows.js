@@ -577,6 +577,7 @@ const UNIVERSAL_OBJECTIONS = [
   { q: 'We already have someone for that.', a: 'Good to hear you\'re on it! Out of curiosity, are they doing [the specific thing]? Most setups we replace were missing that one piece.' },
   { q: 'I don\'t trust AI with my customers.', a: 'I get it. That\'s why most of what we do doesn\'t even need AI. The AI parts are optional, and you approve exactly what it says. Want to start with the non-AI version?' },
   { q: 'It\'s not in the budget.', a: 'Understood. We\'re already priced under what most agencies charge ({{marketSetup}} + {{marketMonthly}}/mo). And this isn\'t really a cost, it\'s a way to recover money you\'re already losing. If it brings in even one extra job a month, it\'s paid for itself. Want to start with just the most important piece?' },
+  { q: 'Can I get a refund if it doesn\'t work?', a: 'All sales are final, so we don\'t do refunds. That\'s exactly why we build everything for you and test it together before you rely on it, and why there\'s no long-term contract on the monthly service.' },
   { q: 'Is there a contract?', a: 'No long-term contract. It\'s month to month. We keep you because it works, not because you\'re locked in.' },
 ];
 

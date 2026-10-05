@@ -27,6 +27,8 @@ const QUESTIONS = [
   { key: 'GHL_API_KEY', label: 'GoHighLevel Private Integration key (builds client accounts)', check: /^pit-/, secret: true, help: 'Guide Part 8. Starts with pit-' },
   { key: 'GHL_COMPANY_ID', label: 'GoHighLevel Company ID', skipIf: (env) => !env.GHL_API_KEY, help: 'Guide Part 8. You pick your template (snapshot) inside the app later.' },
   { key: 'RETELL_API_KEY', label: 'Retell API key (AI receptionists)', check: /^key_/, secret: true, help: 'Guide Part 9.' },
+  { key: 'ANTHROPIC_API_KEY', label: 'Anthropic API key (optional: AI-written call openers)', check: /^sk-ant-/, secret: true, help: 'Guide Part 9b. Optional.' },
+  { key: 'BACKUP_BUCKET', label: 'Google Cloud Storage bucket for off-server backups (optional)', help: 'Guide Part 10. Just the bucket name, like salesboard-backups-yourname' },
   { key: 'SETUP_WEBHOOK_URL', label: 'Extra automation webhook URL (optional: Make / Zapier)', check: /^https:\/\//, help: 'Optional. Most people skip this.' },
 ];
 
@@ -96,6 +98,8 @@ async function main() {
   console.log(`   ${on('STRIPE_SECRET_KEY')} Stripe payment links`);
   console.log(`   ${env.GHL_API_KEY && env.GHL_COMPANY_ID ? '✅' : '—'} GoHighLevel client accounts`);
   console.log(`   ${on('RETELL_API_KEY')} AI receptionists`);
+  console.log(`   ${on('ANTHROPIC_API_KEY')} AI-written openers`);
+  console.log(`   ${on('BACKUP_BUCKET')} Off-server backups`);
   console.log(`   ${on('SETUP_WEBHOOK_URL')} Extra automation webhook`);
   console.log('   ✅ Webhook signing secret (auto-generated)\n');
   console.log('   Restart SalesBoard so it picks up the changes:');

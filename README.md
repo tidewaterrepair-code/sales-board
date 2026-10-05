@@ -7,10 +7,15 @@ A fun, competitive sales dashboard built so anyone can use it. Your team uses it
 - 🎉 **One-button setup**: when the lead says yes, the rep presses **THEY SAID YES**, ticks what the client agreed to (plus the AI upgrade, phone area code, login and payment options) and presses **SET IT ALL UP**. SalesBoard then builds everything while the rep watches: a Stripe payment link, the client's **GoHighLevel sub-account from your template** with their details filled in and only their workflows switched on, the owner's login, an **AI receptionist in Retell with a local phone number**, and a welcome email with their setup form. When the client submits the form, their answers flow into GoHighLevel and the AI automatically.
 - 🏆 **Leaderboard**: points, levels (Rookie → Legend), badges, streaks, a weekly contest, a live "who just closed" ticker with sound and confetti.
 - 💰 **Commission**: reps get **10% of the setup fee, paid once**, on every deal they close. There's no commission on monthly fees. It's tracked as *pending → earned (client paid) → paid out*.
+- ⚡ **Reps get paid fast**: link a debit card once (a Cash App Card works if Stripe accepts it) and commission lands within minutes of the client paying, via Stripe Connect Instant Payouts. Or save a $cashtag and the manager pays in one tap.
 - 📧 **Email drip**: any lead who gives an email gets automatic follow-ups through Brevo/Resend free tiers.
-- 🏷️ **Priced under market, never at a loss**: researched prices, with live profit math for the manager.
+- 🏷️ **Priced under market, never at a loss**: researched prices, with live profit math for the manager. Yearly prepay option (2 months free). All sales final: the no-refund policy is shown before every payment.
+- ✨ **AI openers** *(optional)*: Claude writes a personal first line for each call from the business's Google reviews.
+- 🔔 **Phone notifications**: installable app with a buzz when a callback is due or a commission is paid.
+- 📈 **Insights**: close rate by business type and lead signal, best hours to call, the bundles that sell.
+- 🛡️ **Built to keep running**: interrupted setups resume after a restart, temporary vendor errors are retried, duplicate client accounts are prevented, nightly backups (optionally off-server), SQLite storage, a do-not-call list, and Google data handled per Google's terms (only place IDs are saved).
 
-Zero dependencies. Only Node.js 20+ is needed.
+Needs Node.js 22.5+ (the installer gets it for you). One package: the Anthropic SDK, used only for AI openers.
 
 ---
 
@@ -96,7 +101,10 @@ All keys go in `.env` (see `.env.example`).
 
 Step-by-step instructions for every free tier are in **[docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md)**. In short:
 
-- **Google leads**: enable *Places API (New)*, put the key in `GOOGLE_PLACES_API_KEY`. Google gives 1,000 searches/month free. The app counts them and stops at `GOOGLE_MONTHLY_LIMIT` (default 1000) so you're never billed by surprise, and repeat searches within 24h are served from cache.
+- **Google leads**: enable *Places API (New)*, put the key in `GOOGLE_PLACES_API_KEY`. Google gives 1,000 searches/month free. The app counts them and stops at `GOOGLE_MONTHLY_LIMIT` (default 1000) so you're never billed by surprise. Google's terms only allow storing place IDs, so business details are kept in memory and looked up again when needed (`GOOGLE_DETAILS_MONTHLY_LIMIT`, default 1000). Once a rep has actually talked to a business, the details they confirmed become your own records.
+- **Instant rep payouts**: turn on Stripe Connect in your Stripe dashboard. Each rep sets up instant pay from **💰 My Money**. Commission transfers automatically once the client's payment is available in your balance. Keep a balance cushion to make it instant from day one.
+- **AI openers** *(optional)*: `ANTHROPIC_API_KEY`.
+- **Backups**: nightly copies in `data/backups/` (14 kept). Set `BACKUP_BUCKET` for an off-server copy in Google Cloud Storage.
 - **Email drip**: `BREVO_API_KEY` (or `RESEND_API_KEY`), then set the sender email and mailing address in **Manager → 📧 Email Drip**.
 - **Stripe**: `STRIPE_SECRET_KEY` creates a Checkout link (setup fee + monthly plan) on every close. With `STRIPE_WEBHOOK_SECRET` (endpoint `<PUBLIC_URL>/api/hooks/stripe`, event `checkout.session.completed`), deals are marked paid automatically and commission becomes *earned*. Without Stripe, the manager clicks **Mark client paid**.
 
@@ -122,16 +130,18 @@ curl -X POST $PUBLIC_URL/api/hooks/provisioning \
 Leave out `workflowId` to mark every workflow on the deal live.
 
 ### Hosting
-It's a single Node process that stores everything in `data/db.json`. The free option is a Google Cloud e2-micro VM plus Cloudflare Tunnel (see the guide). Use `bash install.sh --service` or `docker compose up -d`, set `PUBLIC_URL` to your real address, and back up `data/db.json`.
+It's a single Node process that stores everything in `data/salesboard.db` (SQLite, built into Node). An old `data/db.json` is moved over automatically on first start. The free option is a Google Cloud e2-micro VM plus Cloudflare Tunnel, with Cloudflare Access in front so only your team can reach it (see the guide). Use `bash install.sh --service` or `docker compose up -d`, and set `PUBLIC_URL` to your real address.
 
 ---
 
 ## 🧑‍💼 What the manager does
 
-- **Deals**: see every deal, the client's onboarding answers and the fulfillment checklist. Mark the client paid, mark workflows live, re-send automation, cancel.
-- **Team & Payouts**: add reps, reset PINs, deactivate people. See commission owed per rep and record payouts in one click.
-- **Pricing**: edit setup and monthly prices, or turn workflows off.
-- **Settings**: company name, commission %, daily call/close goals, default city, contest title and prize, webhook URL, and how many days before an untouched lead returns to the pool.
+- **🚀 Launch**: the setup checklist with live status and a **Test connection** button for every tool.
+- **Deals**: every deal with its one-button setup steps (Retry if a step failed), the client's onboarding answers, AI-receptionist minutes and the fulfillment checklist. Mark the client paid, pay the rep now, mark workflows live, cancel.
+- **Team & Payouts**: add reps, reset PINs, deactivate people. See commission owed per rep, pay on Cash App in one tap, and record payouts.
+- **Pricing & Profit**: market vs. our price vs. cost, with profit guarded.
+- **📧 Email Drip** and **📈 Insights**.
+- **Settings**: company name, commission %, refund policy, auto-payouts + hold days, AI minutes included, goals, default city, contest, webhook URL, backups (run now / download).
 
 ---
 
@@ -140,7 +150,7 @@ It's a single Node process that stores everything in `data/db.json`. The free op
 ```bash
 npm run setup # change keys (.env)
 npm run dev   # auto-restart on changes
-npm test      # node:test suite (no dependencies)
+npm test      # node:test suite (CI runs it on every push)
 ```
 
 ```
@@ -152,11 +162,16 @@ src/setup.js       deal building, Stripe checkout, signed webhooks
 src/provision.js   one-button setup engine: Stripe → GoHighLevel sub-account + custom values + login → Retell AI receptionist + number → welcome email
 src/drip.js        email drip sequences + Brevo/Resend sending + unsubscribe
 src/pricing.js     profit math (setup commission is one-time, 10%)
+src/payouts.js     rep payouts: Stripe Connect instant payouts + Cash App links
+src/push.js        Web Push notifications (VAPID + RFC 8291 encryption, no packages)
+src/backup.js      nightly backups (+ Google Cloud Storage upload)
+src/ai.js          AI-written openers (Anthropic SDK)
+src/db.js          SQLite storage (writes only changed records), JSON fallback
 scripts/setup.js   interactive .env wizard (used by install.sh)
 src/game.js        points, levels, badges, leaderboard
 src/auth.js        PIN login + sessions
-public/            dashboard (index.html, app.js, styles.css, fx.js) + client onboarding + unsubscribe pages
-docs/              SETUP-GUIDE.md (free tiers) · PRICING-RESEARCH.md (market vs. our prices)
+public/            dashboard (index.html, app.js, styles.css, fx.js, sw.js, manifest) + client onboarding + unsubscribe pages
+docs/              SETUP-GUIDE.md (walkthrough) · GHL-SNAPSHOT.md (template) · PRICING-RESEARCH.md
 ```
 
-Security notes: PINs are hashed with scrypt, and logins lock for 5 minutes after 5 wrong PINs. API keys never leave the server. Onboarding links use random 128-bit tokens. Use HTTPS in production.
+Security notes: PINs are hashed with scrypt, and logins lock for 5 minutes after 5 wrong PINs. Put Cloudflare Access in front for a second lock (guide Part 4b). API keys never leave the server. Onboarding links use random 128-bit tokens. Stripe and Retell webhooks are signature-checked. The do-not-call list stores one-way hashes, not phone numbers.

@@ -1,5 +1,9 @@
 node_modules/
 data/*.json
 data/*.tmp
+data/*.db
+data/*.db-*
+data/*.migrated
+data/backups/
 .env
 .DS_Store

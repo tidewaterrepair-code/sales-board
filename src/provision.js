@@ -30,6 +30,7 @@ const STEPS = [
   ['account', 'Client account built from your template'],
   ['settings', 'Business details filled in + workflows switched on'],
   ['login', 'Owner login created'],
+  ['reminders', 'Setup-form text reminders switched on'],
   ['ai', 'AI receptionist built + phone number bought'],
   ['welcome', 'Welcome email with their setup form'],
   ['automation', 'Extra automation notified'],
@@ -60,7 +61,23 @@ function apiError(service, res, json) {
   return err;
 }
 
-async function ghl(ctx, method, path, { token, body, form } = {}) {
+// Retries "slow down" (429) and temporary server errors with growing waits.
+async function withRetry(fn, ctx, tries = 4) {
+  for (let i = 0; ; i++) {
+    try { return await fn(); } catch (err) {
+      const retryable = err.status === 429 || err.status >= 500 || err.name === 'TimeoutError';
+      if (!retryable || i >= tries - 1) throw err;
+      await (ctx.sleep || sleep)(Math.min(10000, 1000 * 2 ** i));
+    }
+  }
+}
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function ghl(ctx, method, path, opts = {}) {
+  return withRetry(() => ghlOnce(ctx, method, path, opts), ctx);
+}
+
+async function ghlOnce(ctx, method, path, { token, body, form } = {}) {
   const headers = {
     Authorization: `Bearer ${token || ctx.env.GHL_API_KEY}`,
     Version: ctx.env.GHL_API_VERSION || '2021-07-28',
@@ -75,6 +92,10 @@ async function ghl(ctx, method, path, { token, body, form } = {}) {
 }
 
 async function retell(ctx, method, path, body) {
+  return withRetry(() => retellOnce(ctx, method, path, body), ctx);
+}
+
+async function retellOnce(ctx, method, path, body) {
   const res = await ctx.fetchImpl(`${RETELL_BASE}${path}`, {
     method,
     headers: { Authorization: `Bearer ${ctx.env.RETELL_API_KEY}`, 'Content-Type': 'application/json' },
@@ -193,7 +214,7 @@ const RUNNERS = {
     if (!deal.options.paymentLink) return { status: 'skipped', detail: 'You chose to bill them another way' };
     if (deal.paymentUrl) return { status: 'done', detail: 'Link ready' };
     if (!env.STRIPE_SECRET_KEY) return { status: 'practice', detail: 'Connect Stripe to send real payment links' };
-    deal.paymentUrl = await setup.createStripeCheckout({ deal, secretKey: env.STRIPE_SECRET_KEY, publicUrl: ctx.publicUrl, fetchImpl: ctx.fetchImpl });
+    deal.paymentUrl = await setup.createStripeCheckout({ deal, secretKey: env.STRIPE_SECRET_KEY, publicUrl: ctx.publicUrl, policy: ctx.settings.refundPolicy, fetchImpl: ctx.fetchImpl });
     deal.paymentError = '';
     return { status: 'done', detail: 'Link ready to text/email' };
   },
@@ -202,10 +223,18 @@ const RUNNERS = {
     const { deal, env, settings } = ctx;
     if (deal.ghl.locationId) return { status: 'done', detail: `Sub-account ${deal.ghl.locationId}` };
     if (!has(env, 'GHL_API_KEY', 'GHL_COMPANY_ID')) return { status: 'practice', detail: 'Connect GoHighLevel to build real client accounts' };
+    // Never build two accounts for one client: if an earlier try created it but
+    // the reply got lost, find it (we tag each one with the deal id in its name).
+    const tag = `[SB-${deal.id.slice(-6)}]`;
+    try {
+      const found = await ghl(ctx, 'GET', `/locations/search?companyId=${encodeURIComponent(env.GHL_COMPANY_ID)}&limit=100&order=desc`);
+      const match = (found.locations || []).find((l) => String(l.name || '').includes(tag));
+      if (match) { deal.ghl.locationId = match.id; return { status: 'done', detail: 'Found the account an earlier try already built' }; }
+    } catch { /* search is best-effort */ }
     const addr = splitAddress(deal.business.address, deal.business.city);
     const [firstName, ...rest] = (deal.contact.name || 'Owner').split(' ');
     const body = {
-      name: deal.business.name,
+      name: `${deal.business.name} ${tag}`.slice(0, 100),
       companyId: env.GHL_COMPANY_ID,
       phone: toE164(deal.business.phone) || undefined,
       address: addr.address || undefined,
@@ -261,6 +290,21 @@ const RUNNERS = {
     return { status: 'done', detail: `${deal.contact.email} (they click "Forgot password" to set theirs)` };
   },
 
+  // Adds the owner as a contact in their account with a tag. Your snapshot's
+  // "SB · Setup form reminder" workflow texts them until the form is done.
+  async reminders(ctx) {
+    const { deal } = ctx;
+    if (!deal.contact.phone && !deal.contact.email) return { status: 'skipped', detail: 'No owner phone or email' };
+    if (deal.ghl.ownerContactId) return { status: 'done', detail: 'Owner added with tag sb-setup-pending' };
+    if (!deal.ghl.locationId) return { status: ctx.status('account') === 'practice' ? 'practice' : 'skipped', detail: 'Needs the client account first' };
+    if (deal.onboarding) return { status: 'skipped', detail: 'They already filled in the form' };
+    const token = await locationToken(ctx, deal.ghl.locationId);
+    const [firstName, ...rest] = (deal.contact.name || 'Owner').split(' ');
+    const r = await ghl(ctx, 'POST', '/contacts/upsert', { token, body: { locationId: deal.ghl.locationId, firstName, lastName: rest.join(' ') || undefined, email: deal.contact.email || undefined, phone: toE164(deal.contact.phone) || undefined, tags: ['sb-setup-pending', 'sb-owner'] } });
+    deal.ghl.ownerContactId = r.contact?.id || r.id;
+    return { status: 'done', detail: 'Owner added with tag sb-setup-pending' };
+  },
+
   async ai(ctx) {
     const { deal, env, settings } = ctx;
     if (!deal.workflows.some((w) => w.id === 'ai_receptionist')) return { status: 'skipped', detail: 'Not purchased' };
@@ -280,6 +324,8 @@ const RUNNERS = {
         response_engine: { type: 'retell-llm', llm_id: r.llmId },
         voice_id: env.RETELL_VOICE_ID || 'retell-Cimo',
         agent_name: `${deal.business.name} Receptionist`.slice(0, 80),
+        // Retell tells us when each call ends so we can track minutes used.
+        ...(/^https:\/\//.test(ctx.publicUrl) ? { webhook_url: `${ctx.publicUrl}/api/hooks/retell` } : {}),
       });
       r.agentId = agent.agent_id;
     }
@@ -368,6 +414,14 @@ async function syncOnboarding(ctx) {
   const results = [];
   if (deal.ghl.locationId && ctx.env.GHL_API_KEY) {
     try { await upsertCustomValues(ctx, deal.ghl.locationId, customValuesFor(deal, ctx.settings, ctx.publicUrl)); results.push('GoHighLevel updated'); } catch (err) { results.push(`GoHighLevel: ${err.message}`); }
+  }
+  if (deal.ghl.ownerContactId && ctx.env.GHL_API_KEY) {
+    try {
+      const token = await locationToken(ctx, deal.ghl.locationId);
+      await ghl(ctx, 'DELETE', `/contacts/${deal.ghl.ownerContactId}/tags`, { token, body: { tags: ['sb-setup-pending'] } });
+      await ghl(ctx, 'POST', `/contacts/${deal.ghl.ownerContactId}/tags`, { token, body: { tags: ['sb-setup-done'] } });
+      results.push('Setup reminders stopped');
+    } catch (err) { results.push(`Reminders: ${err.message}`); }
   }
   if (deal.retell.llmId && ctx.env.RETELL_API_KEY) {
     try {

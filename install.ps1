@@ -24,7 +24,7 @@ if ($here -and (Select-String -Path 'package.json' -Pattern '"name": "sales-boar
 
 # 2. Node.js 20+
 $nodeOk = $false
-if (Has node) { $nodeOk = [int](node -p "process.versions.node.split('.')[0]") -ge 20 }
+if (Has node) { node -e "const [a,b]=process.versions.node.split('.').map(Number);process.exit(a>22||(a===22&&b>=5)?0:1)"; $nodeOk = ($LASTEXITCODE -eq 0) }
 if (-not $nodeOk) {
   Say 'Installing Node.js LTS'
   winget install -e --id OpenJS.NodeJS.LTS --accept-source-agreements --accept-package-agreements
@@ -33,7 +33,12 @@ if (-not $nodeOk) {
 if (-not (Has node)) { throw 'Node.js is required. Install it from https://nodejs.org and run this again.' }
 Ok "Node.js $(node -v)"
 
-# 3. Settings
+# 3. Packages
+Say 'Installing packages'
+npm ci --omit=dev --no-audit --no-fund | Out-Null
+if ($LASTEXITCODE -ne 0) { npm install --omit=dev --no-audit --no-fund | Out-Null }
+
+# 4. Settings
 Say 'Setting up your keys (press Enter to skip any of them)'
 node scripts/setup.js
 New-Item -ItemType Directory -Force -Path data | Out-Null

@@ -25,6 +25,24 @@ const FIELD_MASK = [
   'nextPageToken',
 ].join(',');
 
+function normalizePlace(p, industry, city) {
+  return {
+    placeId: p.id,
+    name: p.displayName?.text || 'Unknown business',
+    address: p.formattedAddress || '',
+    phone: p.nationalPhoneNumber || '',
+    website: p.websiteUri || '',
+    rating: typeof p.rating === 'number' ? p.rating : null,
+    reviews: p.userRatingCount || 0,
+    mapsUrl: p.googleMapsUri || '',
+    businessStatus: p.businessStatus || 'OPERATIONAL',
+    category: p.primaryTypeDisplayName?.text || industry.label,
+    industry: industry.key,
+    city,
+    source: 'google',
+  };
+}
+
 async function searchGoogle({ apiKey, industryKey, city, pageToken, fetchImpl = fetch }) {
   const industry = getIndustry(industryKey);
   const body = { textQuery: `${industry.query} in ${city}`, pageSize: 20 };
@@ -45,22 +63,34 @@ async function searchGoogle({ apiKey, industryKey, city, pageToken, fetchImpl = 
     err.status = 502;
     throw err;
   }
-  const leads = (json.places || []).map((p) => ({
-    placeId: p.id,
-    name: p.displayName?.text || 'Unknown business',
-    address: p.formattedAddress || '',
-    phone: p.nationalPhoneNumber || '',
-    website: p.websiteUri || '',
-    rating: typeof p.rating === 'number' ? p.rating : null,
-    reviews: p.userRatingCount || 0,
-    mapsUrl: p.googleMapsUri || '',
-    businessStatus: p.businessStatus || 'OPERATIONAL',
-    category: p.primaryTypeDisplayName?.text || industry.label,
-    industry: industry.key,
-    city,
-    source: 'google',
-  }));
+  const leads = (json.places || []).map((p) => normalizePlace(p, industry, city));
   return { leads, nextPageToken: json.nextPageToken || null };
+}
+
+const DETAIL_FIELDS = 'id,displayName,formattedAddress,nationalPhoneNumber,websiteUri,rating,userRatingCount,googleMapsUri,businessStatus,primaryTypeDisplayName';
+
+// Fresh details for one business (used instead of storing Google data).
+// withReviews adds a few review snippets (a pricier Google tier; never stored).
+async function getPlaceDetails({ apiKey, placeId, industryKey, city, withReviews = false, fetchImpl = fetch }) {
+  const res = await fetchImpl(`https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}`, {
+    headers: { 'X-Goog-Api-Key': apiKey, 'X-Goog-FieldMask': withReviews ? `${DETAIL_FIELDS},reviews` : DETAIL_FIELDS },
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(json?.error?.message || `Google Places details failed (${res.status})`);
+    err.status = 502;
+    throw err;
+  }
+  const lead = normalizePlace(json, getIndustry(industryKey), city);
+  const reviews = withReviews ? (json.reviews || []).map((r) => ({ rating: r.rating, text: (r.text?.text || r.originalText?.text || '').slice(0, 600) })).filter((r) => r.text) : [];
+  return { lead, reviews };
+}
+
+// What we keep for a Google lead: the place ID plus our own scoring, with
+// no Google-provided numbers or text (Google's terms allow storing place IDs).
+const GENERIC_SIGNAL = { no_website: 'No website', few_reviews: 'Few reviews', low_rating: 'Low rating', no_rating: 'No rating yet', busy: 'Busy & loved', no_phone: 'No phone listed', closed: 'Not operating' };
+function storableAnalysis(a) {
+  return { ...a, signals: a.signals.map((sig) => ({ ...sig, label: GENERIC_SIGNAL[sig.key] || sig.key })) };
 }
 
 // ---------- Demo data ----------
@@ -180,4 +210,4 @@ function reviewLinkFor(lead) {
   return lead.source === 'google' && lead.placeId ? `https://search.google.com/local/writereview?placeid=${encodeURIComponent(lead.placeId)}` : '';
 }
 
-module.exports = { searchGoogle, demoLeads, analyzeLead, reviewLinkFor };
+module.exports = { searchGoogle, getPlaceDetails, demoLeads, analyzeLead, reviewLinkFor, storableAnalysis };

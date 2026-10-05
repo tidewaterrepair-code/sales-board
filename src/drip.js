@@ -228,8 +228,9 @@ function unsubscribe(db, token) {
 
 const money = (n) => `$${Number(n || 0).toLocaleString('en-US')}`;
 
-function buildContext(db, d, { settings, catalog, publicUrl }) {
-  const lead = db.leads.find((l) => l.id === d.leadId) || {};
+function buildContext(db, d, { settings, catalog, publicUrl, hydrate }) {
+  const found = db.leads.find((l) => l.id === d.leadId);
+  const lead = (found && hydrate ? hydrate(found) : found) || {};
   const deal = db.deals.find((x) => x.id === d.dealId) || null;
   const rep = db.users.find((u) => u.id === (deal?.repId || lead.repId || d.enrolledBy));
   const ind = getIndustry(lead.industry);
@@ -306,7 +307,7 @@ async function sendEmail({ env, settings, to, toName, subject, html, text, unsub
 }
 
 // Sends every email that's due, within today's cap. Safe to call often.
-async function tick(db, { settings, env, catalog, publicUrl, fetchImpl = fetch, now = Date.now() }) {
+async function tick(db, { settings, env, catalog, publicUrl, hydrate, fetchImpl = fetch, now = Date.now() }) {
   const status = readiness(db, settings, env);
   if (!status.ready) return { sent: 0, reason: status.missing.join(', ') };
   db.data.usage.email = db.data.usage.email || {};
@@ -319,7 +320,7 @@ async function tick(db, { settings, env, catalog, publicUrl, fetchImpl = fetch, 
     const seq = SEQUENCES[d.sequence];
     const step = seq[d.step];
     if (!step) { d.status = 'completed'; continue; }
-    const ctx = buildContext(db, d, { settings, catalog, publicUrl });
+    const ctx = buildContext(db, d, { settings, catalog, publicUrl, hydrate });
     const deal = ctx._deal;
     if (d.sequence === 'customer') {
       if (!deal || deal.status === 'cancelled') { d.status = 'stopped'; d.endedReason = 'Deal cancelled'; continue; }

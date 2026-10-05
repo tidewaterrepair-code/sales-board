@@ -60,6 +60,21 @@
   const cityOf = (lead) => (lead.city || '').split(',')[0].trim() || 'your area';
   const isManager = () => S.user?.role === 'manager';
 
+  const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+  async function enablePush() {
+    if (!pushSupported()) return toast('This browser can\'t do notifications. On iPhone, add SalesBoard to your Home Screen first.', 'bad', 6000);
+    const perm = await Notification.requestPermission();
+    if (perm !== 'granted') return toast('Notifications are blocked. Turn them on for this site in your browser settings.', 'bad', 6000);
+    const reg = await navigator.serviceWorker.ready;
+    const { publicKey } = await api('GET', '/api/push/key');
+    const raw = atob(publicKey.replace(/-/g, '+').replace(/_/g, '/') + '='.repeat((4 - (publicKey.length % 4)) % 4));
+    const key = Uint8Array.from(raw, (c) => c.charCodeAt(0));
+    const sub = (await reg.pushManager.getSubscription()) || (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+    await api('POST', '/api/push/subscribe', { subscription: sub.toJSON() });
+    await api('POST', '/api/push/test').catch(() => {});
+    toast('🔔 Notifications on! You should get a test buzz now.', 'good', 5000);
+  }
+
   async function api(method, path, body) {
     const res = await fetch(path, {
       method,
@@ -166,9 +181,11 @@
     ['money', '💰', 'My Money'],
   ];
   const route = () => (location.hash.replace(/^#\/?/, '') || 'home').split('/');
-  addEventListener('hashchange', () => render());
+  // Moving to another page closes any open popup.
+  addEventListener('hashchange', () => { modalRoot.innerHTML = ''; S.onModalClose = null; S.success = null; render(); });
   const go = (r) => { if (location.hash === `#/${r}`) render(); else location.hash = `#/${r}`; };
 
+  let renderSeq = 0;
   async function render() {
     if (!S.token) return renderLogin();
     if (!S.user || !S.catalog) {
@@ -182,7 +199,11 @@
     const [name, arg] = route();
     if (!document.getElementById('view')) renderShell();
     updateChrome(name);
-    const view = document.getElementById('view');
+    // Only the most recent navigation may draw: a slow page that finishes
+    // after the rep already moved on must not overwrite the new page.
+    const seq = ++renderSeq;
+    const real = document.getElementById('view');
+    const view = { set innerHTML(html) { if (seq === renderSeq) real.innerHTML = html; }, get innerHTML() { return real.innerHTML; } };
     const views = { home: viewHome, leads: viewLeads, mine: viewMine, call: viewCall, playbook: viewPlaybook, board: viewBoard, money: viewMoney, admin: viewAdmin };
     const fn = views[name] || viewHome;
     if (name === 'admin' && !isManager()) return go('home');
@@ -358,8 +379,10 @@
   async function viewHome(view) {
     await refreshMe();
     const st = S.stats;
-    const { leads } = await api('GET', '/api/leads/mine');
+    const [{ leads }, best] = await Promise.all([api('GET', '/api/leads/mine'), api('GET', '/api/insights/best-time').catch(() => ({ bestHours: [] }))]);
     S.mine.leads = leads;
+    const hourLabel = (h) => new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric' });
+    const pushReady = pushSupported() && typeof Notification !== 'undefined' && Notification.permission === 'granted';
     const callbacks = leads.filter((l) => l.status === 'callback').sort((a, b) => (a.callbackAt || 0) - (b.callbackAt || 0));
     const queue = leads.filter((l) => ['new', 'called', 'callback', 'interested'].includes(l.status)).length;
     const callP = st.today.callGoal ? Math.min(100, (st.today.calls / st.today.callGoal) * 100) : 100;
@@ -395,6 +418,8 @@
           <div class="bar gold" style="margin-top:.5rem"><i style="width:${Math.round(lvl.progress * 100)}%"></i></div>
         </div>
 
+        ${!pushReady ? `<div class="card row between" style="border-color:rgba(79,140,255,.6)"><div>🔔 <b>Get a buzz when a callback is due</b> (and when you get paid).<div class="tiny muted">${pushSupported() ? 'One tap to turn on.' : 'On iPhone: tap Share → "Add to Home Screen", open SalesBoard from your home screen, then tap here.'}</div></div>${pushSupported() ? '<button class="btn primary sm" data-act="push-enable">Turn on</button>' : ''}</div>` : ''}
+        ${best.bestHours.length ? `<div class="card">⏰ <b>Best time to call:</b> ${best.bestHours.map((h) => hourLabel(h.hour)).join(' and ')}. That's when the team gets the most yeses. Block it off for dialing!</div>` : ''}
         <div class="contest"><span class="big">🏆</span><div><b>${esc(S.settings.contestTitle)}</b><div>${esc(S.settings.contestPrize)}</div></div><a class="btn sm" style="margin-left:auto" href="#/board">Standings</a></div>
 
         <div class="grid two">
@@ -472,7 +497,8 @@
     const a = l.analysis;
     const recs = a.recommended.map(wfById).filter(Boolean);
     let action;
-    if (l.claim?.mine) action = `<button class="btn go block" data-act="open-lead" data-id="${esc(l.claim.leadId)}">📞 Open (your lead)</button>`;
+    if (l.dnc) action = '<button class="btn block" disabled>🚫 Do not call</button>';
+    else if (l.claim?.mine) action = `<button class="btn go block" data-act="open-lead" data-id="${esc(l.claim.leadId)}">📞 Open (your lead)</button>`;
     else if (l.claim) action = `<button class="btn block" disabled>🔒 ${esc(l.claim.by)}'s lead</button>`;
     else if (!l.phone) action = '<button class="btn block" disabled>📵 No phone number</button>';
     else action = `<button class="btn go block" data-act="claim" data-i="${i}">📞 Claim &amp; Call</button>`;
@@ -627,6 +653,7 @@
         </div>
 
         <div class="stack">
+          ${won ? '' : openerHtml(lead)}
           ${emailHtml(lead)}
           ${won ? '' : pickerHtml(lead, wfs)}
           ${won ? '' : earnHtml(wfs)}
@@ -685,6 +712,16 @@
       </div>
       <div class="label" style="margin-top:.6rem">Quick bundles</div>
       <div class="chips" style="margin-top:.35rem">${S.catalog.bundles.map((b) => `<button class="chip" data-act="bundle" data-id="${b.id}" title="${esc(b.pitch)}">${b.emoji} ${esc(b.name)}</button>`).join('')}</div>
+    </div>`;
+  }
+
+  function openerHtml(lead) {
+    if (!S.catalog.aiOpeners) return '';
+    const o = lead.opener;
+    return `<div class="card" style="border-color:rgba(176,107,255,.5)">
+      <h3>✨ AI opener</h3>
+      ${o ? `<div class="answer" style="background:rgba(176,107,255,.1);border-color:rgba(176,107,255,.5)">🗣️ ${esc(o.text)}</div>` : '<p class="small muted">Writes a personal first line from this business\'s Google reviews.</p>'}
+      <button class="btn sm ${o ? 'ghost' : 'primary'}" style="margin-top:.5rem" data-act="ai-opener">${o ? '🔄 Write a new one' : '✨ Write my opener'}</button>
     </div>`;
   }
 
@@ -809,7 +846,9 @@
   function notInterestedModal() {
     const reasons = ['Too expensive', 'Already has a solution', 'Not the decision maker', 'Hung up', 'Bad timing', 'Other'];
     modal(`<h2>👎 What happened?</h2><p class="muted">One tap. Helps the team learn.</p>
-      <div class="grid two" style="margin-top:1rem">${reasons.map((r) => `<button class="btn lg" data-act="ni-reason" data-r="${esc(r)}">${esc(r)}</button>`).join('')}</div>`);
+      <div class="grid two" style="margin-top:1rem">${reasons.map((r) => `<button class="btn lg" data-act="ni-reason" data-r="${esc(r)}">${esc(r)}</button>`).join('')}</div>
+      <button class="btn danger block" style="margin-top:1rem" data-act="ni-reason" data-r="Asked us not to call again" data-dnc="1">🚫 They said "never call again"</button>
+      <p class="tiny muted center">That puts them on the do-not-call list so nobody on the team calls them again.</p>`);
   }
 
   // ⭐ ONE-BUTTON SETUP ⭐
@@ -823,6 +862,7 @@
       name: fd.get('name'), email: fd.get('email'), phone: fd.get('phone'),
       ai: fd.getAll('ai'), areaCode: fd.get('areaCode') ?? S.call.yesDraft?.areaCode,
       createLogin: fd.get('createLogin') === 'on', paymentLink: fd.get('paymentLink') === 'on',
+      billing: fd.get('billing') || 'monthly',
     };
   }
 
@@ -864,12 +904,17 @@
               ${wantsAI ? `<div class="row"><label class="small" style="flex:1">📞 Area code for their new AI phone number</label><input class="input" name="areaCode" inputmode="numeric" maxlength="3" style="width:90px" value="${esc(area)}"></div>` : ''}
               <label class="check ${d.createLogin ? 'on' : ''}"><input type="checkbox" name="createLogin" ${d.createLogin ? 'checked' : ''} data-act="yes-wf"><span>🔑 Give the owner their own login to see their leads and messages</span></label>
               <label class="check ${d.paymentLink ? 'on' : ''}"><input type="checkbox" name="paymentLink" ${d.paymentLink ? 'checked' : ''} data-act="yes-wf"><span>💳 Send them a payment link</span></label>
+              <div class="row" style="gap:.4rem">
+                <label class="check ${d.billing !== 'yearly' ? 'on' : ''}" style="flex:1"><input type="radio" name="billing" value="monthly" ${d.billing !== 'yearly' ? 'checked' : ''} data-act="yes-wf"><span>📅 Pay monthly</span></label>
+                <label class="check ${d.billing === 'yearly' ? 'on' : ''}" style="flex:1"><input type="radio" name="billing" value="yearly" ${d.billing === 'yearly' ? 'checked' : ''} data-act="yes-wf"><span>🎁 Pay yearly<br><span class="tiny">2 months free</span></span></label>
+              </div>
             </div>
           </div>
           <div><div class="label">4 · Check the total</div>
-            <div class="earn" style="margin-top:.4rem"><b style="font-size:1.2rem">${money(setup)}</b> setup + <b>${money(monthly)}</b>/mo<br>
+            <div class="earn" style="margin-top:.4rem"><b style="font-size:1.2rem">${money(setup)}</b> setup + ${d.billing === 'yearly' ? `<b>${money(monthly * 10)}</b>/year <span class="tiny">(saves ${money(monthly * 2)})</span>` : `<b>${money(monthly)}</b>/mo`}<br>
             <span class="small">You earn <b style="color:var(--green)">${money(commissionOf(setup))}</b> (one time) + <b style="color:var(--gold)">${wfs.length ? pointsOf(wfs) : 0} pts</b>${wfs.length > 1 ? ' (bundle bonus included)' : ''}</span></div>
           </div>
+          <div class="coach">🗣️ Before you press the button, say: <i>"Just so you know: ${esc(S.catalog.refundPolicy || 'All sales are final.')}"</i></div>
           <button class="btn go xl" ${wfs.length ? '' : 'disabled'} id="setup-btn">🚀 SET IT ALL UP</button>
           <p class="tiny muted center">${c.ghl ? 'Builds their account, switches on their workflows' : '🧪 Practice mode: shows every step. Real setup turns on when your manager connects the tools'}${c.retell && wantsAI ? ', builds their AI receptionist' : ''}, and sends their payment + setup links.</p>
         </form>`, { focus: false });
@@ -890,7 +935,7 @@
         leadId: S.call.lead.id,
         workflowIds: S.call.selected,
         contact: { name: d.name, email: d.email, phone: d.phone },
-        options: { aiAddons: d.ai, areaCode: d.areaCode, createLogin: d.createLogin, paymentLink: d.paymentLink },
+        options: { aiAddons: d.ai, areaCode: d.areaCode, createLogin: d.createLogin, paymentLink: d.paymentLink, billing: d.billing },
       });
       S.stats = r.stats;
       S.call.yesDraft = null;
@@ -1070,7 +1115,8 @@
 
   async function viewMoney(view) {
     await refreshMe();
-    const { deals } = await api('GET', '/api/deals/mine');
+    const [{ deals }, pay] = await Promise.all([api('GET', '/api/deals/mine'), api('GET', '/api/me/payout')]);
+    if (/payout=done/.test(location.hash)) toast(pay.stripe.ready ? '⚡ Instant pay is ready!' : '⏳ Stripe is still checking your info. Check back soon.', pay.stripe.ready ? 'gold' : '', 5000);
     const c = S.stats.commission;
     view.innerHTML = `
       <div class="stack">
@@ -1081,6 +1127,7 @@
           <div class="card"><div class="label">💸 Paid out</div><div class="stat">${money(c.paidOut)}</div><div class="small muted">Already in your pocket</div></div>
           <div class="card"><div class="label">🏆 Lifetime</div><div class="stat gold">${money(c.lifetime)}</div><div class="small muted">${pct(S.catalog.commissionRate)} of each setup fee, paid once</div></div>
         </div>
+        ${payoutCard(pay)}
         <div class="card">
           <h3>Your deals</h3>
           ${deals.length ? `<div class="table-wrap"><table class="tbl"><thead><tr><th>Business</th><th class="hide-sm">Workflows</th><th class="num">Setup</th><th class="num">You earn</th><th>Status</th><th></th></tr></thead><tbody>
@@ -1089,7 +1136,7 @@
             <td class="hide-sm">${d.workflows.map((w) => `<span title="${esc(w.name)}">${w.emoji}</span>`).join(' ')}</td>
             <td class="num">${money(d.setupTotal)}</td>
             <td class="num" style="color:var(--green);font-weight:800">${money(d.commission)}</td>
-            <td><span class="status ${d.commissionStatus}">${commissionLabel(d.commissionStatus)}</span></td>
+            <td><span class="status ${d.commissionStatus}">${commissionLabel(d.commissionStatus)}</span>${d.commissionPayout?.detail ? `<div class="tiny muted">${esc(d.commissionPayout.detail)}</div>` : ''}</td>
             <td>${d.status === 'awaiting_payment' ? `<button class="btn sm" data-act="copy" data-text="${esc(d.paymentUrl || d.onboardingUrl)}" title="Copy link to send the client">📋 Link</button>` : ''}</td>
           </tr>`).join('')}</tbody></table></div>` : '<div class="empty"><div class="big">🎯</div><p>No deals yet. Your first one is a call away!</p><button class="btn go" data-act="start-calling">📞 Start calling</button></div>'}
         </div>
@@ -1097,11 +1144,32 @@
       </div>`;
   }
 
+  function payoutCard(pay) {
+    const st = pay.stripe;
+    const instant = !pay.stripeAvailable
+      ? '<p class="small muted">Instant pay turns on when your manager connects Stripe.</p>'
+      : st.ready
+        ? `<p class="small">✅ <b>Ready.</b> When a client pays, your commission is sent to your card automatically${pay.holdDays ? ` (after a ${pay.holdDays}-day hold)` : ''}, usually within minutes.</p><button class="btn sm" data-act="payout-dashboard">See my payouts in Stripe</button>`
+        : `<p class="small">Add your <b>debit card or Cash App Card</b> once. Then every commission lands on it automatically, usually within minutes.</p><button class="btn go" data-act="payout-setup">${st.started ? '▶ Finish instant-pay setup' : '⚡ Set up instant pay'}</button><p class="tiny muted" style="margin-top:.4rem">Stripe asks for your name, birthday and the last 4 of your SSN (needed for tax forms), then your card. Takes about 3 minutes.</p>`;
+    return `<div class="card">
+      <h3>💸 How do you want to get paid?</h3>
+      <div class="grid two" style="margin-top:.6rem">
+        <div class="card" style="padding:.9rem;${st.ready ? 'border-color:var(--green)' : ''}"><b>⚡ Instant to your card</b>${instant}</div>
+        <form class="card stack" style="padding:.9rem" data-form="cashtag"><b>💚 Cash App</b>
+          <p class="small muted" style="margin:0">Your manager can pay you in one tap with Cash App.</p>
+          <div class="row"><input class="input" name="cashtag" placeholder="$YourCashtag" value="${esc(pay.cashtag)}" style="flex:1"><button class="btn">Save</button></div>
+        </form>
+      </div>
+      <p class="tiny muted" style="margin-top:.5rem">Commission = ${COMMISSION_NOTE()} It's paid once the client pays their setup fee.</p>
+    </div>`;
+  }
+
   // ---------------------------------------------------------------- ADMIN
   async function viewAdmin(view) {
     const d = await api('GET', '/api/admin/overview');
     S.admin.data = d;
     S.admin.drips = S.admin.tab === 'drip' ? await api('GET', '/api/admin/drips') : null;
+    S.admin.insights = S.admin.tab === 'insights' ? await api('GET', '/api/admin/insights') : null;
     const t = S.admin.tab;
     view.innerHTML = `
       <div class="stack">
@@ -1112,8 +1180,9 @@
           <div class="card"><div class="label">Commission owed now</div><div class="stat gold">${money(d.totals.commissionOwed)}</div><div class="tiny muted">+ ${money(d.totals.commissionPending)} pending payment</div></div>
           <div class="card"><div class="label">Deals</div><div class="stat">${d.totals.deals}</div></div>
         </div>
-        <div class="tabs">${[['launch', '🚀 Launch'], ['deals', '📑 Deals'], ['team', '👥 Team & Payouts'], ['pricing', '🏷️ Pricing & Profit'], ['drip', '📧 Email Drip'], ['settings', '⚙️ Settings']].map(([k, l]) => `<button class="tab ${t === k ? 'on' : ''}" data-act="admin-tab" data-k="${k}">${l}</button>`).join('')}</div>
-        <div>${t === 'launch' ? adminLaunch(d) : t === 'deals' ? adminDeals(d) : t === 'team' ? adminTeam(d) : t === 'pricing' ? adminPricing(d) : t === 'drip' ? adminDrip(S.admin.drips) : adminSettings(d)}</div>
+        <div class="tabs">${[['launch', '🚀 Launch'], ['deals', '📑 Deals'], ['team', '👥 Team & Payouts'], ['pricing', '🏷️ Pricing & Profit'], ['drip', '📧 Email Drip'], ['insights', '📈 Insights'], ['settings', '⚙️ Settings']].map(([k, l]) => `<button class="tab ${t === k ? 'on' : ''}" data-act="admin-tab" data-k="${k}">${l}</button>`).join('')}</div>
+        ${(d.alerts || []).length ? `<div class="card" style="border-color:var(--warm)">⚠️ <b>AI receptionist minutes:</b> ${d.alerts.map((a) => `${esc(a.business)} used ${a.minutes} of ${a.included} min`).join(' · ')}. Offer them a bigger plan before you pay for extra minutes.</div>` : ''}
+        <div>${t === 'launch' ? adminLaunch(d) : t === 'deals' ? adminDeals(d) : t === 'team' ? adminTeam(d) : t === 'pricing' ? adminPricing(d) : t === 'drip' ? adminDrip(S.admin.drips) : t === 'insights' ? adminInsights(S.admin.insights) : adminSettings(d)}</div>
       </div>`;
   }
 
@@ -1122,12 +1191,14 @@
     const steps = [
       [i.httpsUrl, 'Put SalesBoard online at your own web address', 'So reps can log in from anywhere and clients can open their links. Example: https://board.yourdomain.com', 'Parts 2–4'],
       [i.reps > 0, 'Add your sales team', 'Manager → 👥 Team & Payouts → type their name + a PIN.', 'Part 11', '<button class="btn sm" data-act="admin-tab" data-k="team">Open Team</button>'],
-      [i.google, 'Connect Google (real leads)', 'Paste your Google Places key with npm run setup.', 'Part 5'],
-      [i.email.ready, 'Connect email (Brevo)', i.email.ready ? 'Sending.' : `Still need: ${i.email.missing.join(', ')}.`, 'Part 6', '<button class="btn sm" data-act="admin-tab" data-k="drip">Open Email Drip</button>'],
-      [i.stripe && i.stripeWebhook, 'Connect Stripe (get paid)', i.stripe ? (i.stripeWebhook ? 'Done.' : 'Add the Stripe webhook secret too.') : 'Paste your Stripe keys with npm run setup.', 'Part 7'],
-      [i.p_ghl, 'Connect GoHighLevel (builds client accounts)', 'Paste your Private Integration key + Company ID with npm run setup.', 'Part 8'],
+      [i.google, 'Connect Google (real leads)', 'Paste your Google Places key with npm run setup.', 'Part 5', '', 'google'],
+      [i.email.ready, 'Connect email (Brevo)', i.email.ready ? 'Sending.' : `Still need: ${i.email.missing.join(', ')}.`, 'Part 6', '<button class="btn sm" data-act="admin-tab" data-k="drip">Open Email Drip</button>', 'email'],
+      [i.stripe && i.stripeWebhook, 'Connect Stripe (get paid + instant rep payouts)', i.stripe ? (i.stripeWebhook ? 'Done. For instant rep payouts, also turn on Stripe Connect (Part 7b).' : 'Add the Stripe webhook secret too.') : 'Paste your Stripe keys with npm run setup.', 'Part 7', '', 'stripe'],
+      [i.p_ghl, 'Connect GoHighLevel (builds client accounts)', 'Paste your Private Integration key + Company ID with npm run setup.', 'Part 8', '', 'ghl'],
       [i.p_ghlSnapshot, 'Pick your GoHighLevel template (snapshot)', i.p_ghl ? 'Click the button, pick your template, Save.' : 'Connect GoHighLevel first.', 'Part 8', i.p_ghl ? snapshotPicker(d) : ''],
-      [i.p_retell, 'Connect Retell (AI receptionists)', 'Paste your Retell key with npm run setup.', 'Part 9'],
+      [i.p_retell, 'Connect Retell (AI receptionists)', 'Paste your Retell key with npm run setup.', 'Part 9', '', 'retell'],
+      [Boolean(i.backup.last), 'Backups running', i.backup.last ? `Last backup ${new Date(i.backup.last.at).toLocaleString()}${i.backup.last.uploaded ? ' · copied off-server ✅' : i.backup.bucket ? ` · ⚠️ ${i.backup.last.error}` : ' · add BACKUP_BUCKET for an off-server copy'}` : 'Runs every night automatically. Press the button to make the first one now.', 'Part 9c', '<button class="btn sm" data-act="backup-run">💾 Back up now</button>'],
+      [S.catalog.aiOpeners, '(Optional) AI-written openers', 'Paste an Anthropic API key with npm run setup.', 'Part 9b', '', 'ai'],
       [i.realDeals > 0, 'Do one practice close', 'Find a lead, press THEY SAID YES, then SET IT ALL UP, and watch every step turn green.', 'Part 11', '<a class="btn sm" href="#/leads">Find a lead</a>'],
     ];
     const done = steps.filter((x) => x[0]).length;
@@ -1137,13 +1208,39 @@
         <div class="bar" style="margin:.5rem 0 .2rem"><i style="width:${Math.round((done / steps.length) * 100)}%"></i></div>
         <p class="small muted">Do them top to bottom. The full how-to is <code>docs/SETUP-GUIDE.md</code> (written so anyone can follow it). After changing keys, restart SalesBoard and refresh this page.</p>
       </div>
-      ${steps.map(([ok, title, how, part, extra], n) => `<div class="card" style="${ok ? 'border-color:rgba(34,211,143,.5)' : ''}">
+      ${steps.map(([ok, title, how, part, extra, test], n) => `<div class="card" style="${ok ? 'border-color:rgba(34,211,143,.5)' : ''}">
         <div class="row" style="flex-wrap:nowrap;align-items:flex-start">
           <div style="font-size:1.6rem">${ok ? '✅' : `<span class="avatar" style="width:34px;height:34px;font-size:1rem">${n + 1}</span>`}</div>
-          <div style="flex:1"><b>${esc(title)}</b><div class="small muted">${esc(how)}</div>${extra && !ok ? `<div style="margin-top:.5rem">${extra}</div>` : ''}</div>
+          <div style="flex:1"><b>${esc(title)}</b><div class="small muted">${esc(how)}</div>${extra && !ok ? `<div style="margin-top:.5rem">${extra}</div>` : ''}
+            ${test ? `<div class="row" style="margin-top:.4rem;gap:.4rem"><button class="btn sm ghost" data-act="test-conn" data-svc="${test}">🔌 Test connection</button><span class="small" id="test-${test}">${S.admin.tests?.[test] ? `${S.admin.tests[test].ok ? '✅' : '❌'} ${esc(S.admin.tests[test].detail)}` : ''}</span></div>` : ''}</div>
           <span class="tag">Guide: ${esc(part)}</span>
         </div>
       </div>`).join('')}
+    </div>`;
+  }
+
+  function adminInsights(x) {
+    if (!x) return '<p class="muted">Loading…</p>';
+    const hourLabel = (h) => new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric' });
+    const maxCalls = Math.max(1, ...x.hours.map((h) => h.calls));
+    return `<div class="stack">
+      <div class="card"><h3>⏰ Best times to call</h3>
+        ${x.bestHours.length ? `<p>${x.bestHours.map((h) => `<b>${hourLabel(h.hour)}</b> (${h.rate}% say yes to a callback or more)`).join(' · ')}</p>` : '<p class="muted">Needs at least 10 calls in an hour to compare. Keep dialing!</p>'}
+        <div class="hours">${x.hours.filter((h) => h.hour >= 7 && h.hour <= 20).map((h) => `<div class="hour" title="${hourLabel(h.hour)}: ${h.calls} calls"><i style="height:${Math.round((h.calls / maxCalls) * 100)}%;${h.calls >= 10 && x.bestHours.some((b) => b.hour === h.hour) ? 'background:var(--gold)' : ''}"></i><span>${hourLabel(h.hour).replace(/\s?[AP]M/i, '')}</span></div>`).join('')}</div>
+        <p class="tiny muted">Bars = calls per hour. Gold = best hours. Tell your reps to block these hours for dialing.</p>
+      </div>
+      <div class="grid two">
+        <div class="card table-wrap"><h3>🏪 Which businesses buy</h3>
+          <table class="tbl"><thead><tr><th>Type</th><th class="num">Leads</th><th class="num">Won</th><th class="num">Close rate</th></tr></thead><tbody>
+          ${x.byIndustry.map((r) => `<tr><td>${r.emoji} ${esc(r.label)}</td><td class="num">${r.leads}</td><td class="num">${r.won}</td><td class="num"><b>${r.rate}%</b></td></tr>`).join('') || '<tr><td colspan="4" class="muted">No data yet</td></tr>'}</tbody></table></div>
+        <div class="card table-wrap"><h3>🔥 Which lead signals close</h3>
+          <table class="tbl"><thead><tr><th>Signal</th><th class="num">Leads</th><th class="num">Close rate</th></tr></thead><tbody>
+          ${x.bySignal.map((r) => `<tr><td>${esc(r.label)}</td><td class="num">${r.leads}</td><td class="num"><b>${r.rate}%</b></td></tr>`).join('') || '<tr><td colspan="3" class="muted">No data yet</td></tr>'}</tbody></table></div>
+      </div>
+      <div class="card table-wrap"><h3>📦 What sells together</h3>
+        <table class="tbl"><thead><tr><th>Combo</th><th class="num">Deals</th><th class="num">Setup sold</th></tr></thead><tbody>
+        ${x.bundles.map((b) => `<tr><td>${esc(b.names)}</td><td class="num">${b.deals}</td><td class="num">${money(b.setup)}</td></tr>`).join('') || '<tr><td colspan="3" class="muted">No deals yet</td></tr>'}</tbody></table>
+        <p class="tiny muted">Use this to pick which bundles reps should lead with, and which business types to search first.</p></div>
     </div>`;
   }
 
@@ -1171,7 +1268,7 @@
               <div><div class="label">Business</div>${esc(x.business.phone)} · ${esc(x.business.address || x.business.city)}${x.business.website ? ` · <a href="${esc(x.business.website)}" target="_blank" rel="noopener">site</a>` : ''}</div>
               <div><div class="label">One-button setup ${x.provisioning?.status === 'needs_attention' ? '<span class="status pending">needs attention</span>' : x.provisioning?.status === 'done' ? '<span class="status live">done</span>' : x.provisioning?.status === 'practice' ? '<span class="status paid">practice mode</span>' : ''}</div>
                 <div class="stack" style="margin-top:.4rem">${stepsHtml(x)}</div>
-                ${x.retell?.phoneNumber ? `<div class="small" style="margin-top:.4rem">📞 AI receptionist number: <b>${esc(x.retell.phoneNumber)}</b></div>` : ''}
+                ${x.retell?.phoneNumber ? `<div class="small" style="margin-top:.4rem">📞 AI receptionist number: <b>${esc(x.retell.phoneNumber)}</b>${x.aiUsage ? ` · ${Math.round(x.aiUsage.seconds / 60)} min / ${x.aiUsage.calls} calls this month` : ''}</div>` : ''}
                 ${x.ghl?.locationId ? `<div class="small">🏢 GoHighLevel sub-account: <code>${esc(x.ghl.locationId)}</code></div>` : ''}
                 ${x.provisioning?.onboardingSync ? `<div class="tiny muted">📝 Setup form synced: ${x.provisioning.onboardingSync.results.map(esc).join(' · ') || 'nothing to sync yet'}</div>` : ''}
               </div>
@@ -1180,7 +1277,8 @@
               ${x.onboarding ? `<div><div class="label">Client onboarding answers</div><div class="small">${Object.entries(x.onboarding.answers).map(([k, v]) => `<div><b>${esc(k.replace(/_/g, ' '))}:</b> ${esc(v)}</div>`).join('')}</div></div>` : ''}
               <div class="row">
                 ${!x.paidAt && x.status !== 'cancelled' ? `<button class="btn go sm" data-act="deal-paid" data-id="${esc(x.id)}">💵 Mark client paid</button>` : ''}
-                ${x.commissionStatus === 'earned' ? `<button class="btn primary sm" data-act="deal-payout" data-id="${esc(x.id)}">💸 Commission paid to rep</button>` : ''}
+                ${x.commissionStatus === 'earned' ? `<button class="btn go sm" data-act="deal-paynow" data-id="${esc(x.id)}">⚡ Pay rep now</button><button class="btn primary sm" data-act="deal-payout" data-id="${esc(x.id)}">💸 Mark commission paid</button>` : ''}
+                ${x.commissionPayout?.detail ? `<div class="tiny muted" style="width:100%">Payout: ${esc(x.commissionPayout.detail)}</div>` : ''}
                 ${x.status !== 'cancelled' && (x.provisioning?.steps || []).some((st) => st.status === 'failed' || st.status === 'practice') ? `<button class="btn sm primary" data-act="deal-retry" data-id="${esc(x.id)}">🔁 Retry setup</button>` : ''}
                 ${x.status !== 'cancelled' && x.commissionStatus !== 'paid_out' ? `<button class="btn danger sm" data-act="deal-cancel" data-id="${esc(x.id)}">✖ Cancel deal</button>` : ''}
               </div>
@@ -1214,15 +1312,16 @@
         <h3>👥 Team</h3>
         <table class="tbl"><thead><tr><th>Rep</th><th class="num">Owed</th><th></th></tr></thead><tbody>
         ${d.users.map((u) => `<tr style="${u.active ? '' : 'opacity:.5'}">
-          <td><div class="row" style="flex-wrap:nowrap;gap:.5rem"><span class="avatar" style="--c:${esc(u.color)};width:34px;height:34px;font-size:1.1rem">${esc(u.avatar)}</span><div><b>${esc(u.name)}</b><div class="tiny muted">${u.role}${u.demo ? ' · demo' : ''}${u.active ? '' : ' · inactive'}</div></div></div></td>
+          <td><div class="row" style="flex-wrap:nowrap;gap:.5rem"><span class="avatar" style="--c:${esc(u.color)};width:34px;height:34px;font-size:1.1rem">${esc(u.avatar)}</span><div><b>${esc(u.name)}</b><div class="tiny muted">${u.role}${u.demo ? ' · demo' : ''}${u.active ? '' : ' · inactive'}${u.instantReady ? ' · ⚡ instant pay' : ''}${u.cashtag ? ` · 💚 ${esc(u.cashtag)}` : ''}</div></div></div></td>
           <td class="num" style="color:var(--green);font-weight:800">${money(d.owed[u.id] || 0)}</td>
           <td><div class="row" style="gap:.3rem;justify-content:flex-end">
-            ${d.owed[u.id] ? `<button class="btn sm primary" data-act="rep-payout" data-id="${esc(u.id)}" data-name="${esc(u.name)}" data-amt="${d.owed[u.id]}">💸 Pay out</button>` : ''}
+            ${d.owed[u.id] && u.cashtag ? `<a class="btn sm go" href="https://cash.app/${encodeURIComponent(u.cashtag)}/${Number(d.owed[u.id]).toFixed(2)}" target="_blank" rel="noopener" data-act="cashapp-open" data-id="${esc(u.id)}" data-name="${esc(u.name)}" data-amt="${d.owed[u.id]}">💚 Pay ${money(d.owed[u.id])} on Cash App</a>` : ''}
+            ${d.owed[u.id] ? `<button class="btn sm primary" data-act="rep-payout" data-id="${esc(u.id)}" data-name="${esc(u.name)}" data-amt="${d.owed[u.id]}">💸 Mark paid</button>` : ''}
             <button class="btn sm" data-act="reset-pin" data-id="${esc(u.id)}" data-name="${esc(u.name)}">🔑 PIN</button>
             ${u.id !== S.user.id ? `<button class="btn sm ${u.active ? 'danger' : ''}" data-act="toggle-user" data-id="${esc(u.id)}" data-active="${u.active ? '1' : ''}">${u.active ? 'Deactivate' : 'Activate'}</button>` : ''}
           </div></td>
         </tr>`).join('')}</tbody></table>
-        <p class="tiny muted">"Owed" = commission on deals where the client has paid. Click Pay out after you've paid the rep.</p>
+        <p class="tiny muted">"Owed" = commission on deals the client has paid for. Reps with ⚡ instant pay are paid automatically. For Cash App: tap the green button (Cash App opens with the amount filled in), send it, then tap <b>Mark paid</b>.</p>
       </div>
     </div>`;
   }
@@ -1308,6 +1407,10 @@
         <div class="field"><label>Contest title</label><input class="input" name="contestTitle" value="${esc(s.contestTitle)}"></div>
         <div class="field"><label>Contest prize</label><input class="input" name="contestPrize" value="${esc(s.contestPrize)}"></div>
         <div class="field"><label>Automation webhook URL (Zapier / Make / n8n / GoHighLevel)</label><input class="input" name="webhookUrl" value="${esc(s.webhookUrl)}" placeholder="https://hooks.zapier.com/..."></div>
+        <div class="field"><label>Refund policy (shown before every payment)</label><input class="input" name="refundPolicy" value="${esc(s.refundPolicy)}"></div>
+        <label class="check ${s.autoPayouts !== false ? 'on' : ''}"><input type="checkbox" name="autoPayouts" ${s.autoPayouts !== false ? 'checked' : ''}><span>⚡ Pay reps automatically (instant pay) as soon as the client's payment clears</span></label>
+        <div class="row"><div class="field" style="flex:1"><label>Wait days before paying commission</label><input class="input" name="payoutHoldDays" type="number" min="0" max="120" value="${s.payoutHoldDays || 0}"></div>
+        <div class="field" style="flex:1"><label>AI minutes included per client</label><input class="input" name="aiMinutesIncluded" type="number" min="0" value="${s.aiMinutesIncluded || 600}"></div></div>
         <div class="row"><button class="btn go">💾 Save settings</button><button type="button" class="btn" data-act="test-webhook">🧪 Send test webhook</button></div>
       </form>
       <div class="stack">
@@ -1326,6 +1429,12 @@
           </div>
         </div>
         <div class="card">
+          <h3>💾 Backups</h3>
+          <p class="small">${i.backup.last ? `Last: <b>${new Date(i.backup.last.at).toLocaleString()}</b> (${esc(i.backup.last.file)})${i.backup.last.uploaded ? `<br>Off-server copy: ${esc(i.backup.last.uploaded)}` : ''}${i.backup.last.error ? `<br><span style="color:var(--red)">${esc(i.backup.last.error)}</span>` : ''}` : 'No backup yet. One runs every night automatically.'}</p>
+          <p class="tiny muted">Storage: ${esc(i.storage)}. Keeps the last 14 nightly copies on the server${i.backup.bucket ? ` and uploads each to <code>${esc(i.backup.bucket)}</code>` : '. Add BACKUP_BUCKET for an off-server copy (guide Part 10)'}.</p>
+          <div class="row"><button class="btn primary" data-act="backup-run">💾 Back up now</button><button class="btn" data-act="backup-download">⬇️ Download a copy</button></div>
+        </div>
+        <div class="card">
           <h3>🧪 Demo data</h3>
           <p class="small muted">Load a fake team with two weeks of activity to train new reps or show off the board. Demo reps' PIN is <b>1234</b>.</p>
           <div class="row"><button class="btn primary" data-act="demo-load">Load demo team</button><button class="btn danger" data-act="demo-clear">Remove demo data</button></div>
@@ -1340,6 +1449,7 @@
       <span class="avatar xl" style="--c:${esc(S.user.color)};margin:0 auto">${esc(S.user.avatar)}</span>
       <h2>${esc(S.user.name)}</h2>
       <p class="muted">${S.stats ? `${S.stats.level.emoji} ${esc(S.stats.level.name)} · ${S.stats.points.toLocaleString()} pts` : ''}</p>
+      ${pushSupported() ? '<button class="btn block" data-act="push-enable">🔔 Turn on notifications</button>' : '<p class="small muted">🔔 For notifications on iPhone: Share → "Add to Home Screen", then open SalesBoard from there.</p>'}
       <button class="btn block" data-act="toggle-mute">${muted ? '🔇 Sounds off. Tap to turn on' : '🔊 Sounds on. Tap to mute'}</button>
       <button class="btn danger block" data-act="logout">🚪 Log out</button>
     </div>`);
@@ -1386,7 +1496,7 @@
       logOutcome(o);
     },
     'cb-quick': (el) => { closeModal(); logOutcome('callback', { callbackAt: Number(el.dataset.ts) }); },
-    'ni-reason': (el) => { closeModal(); logOutcome('not_interested', { note: el.dataset.r }); },
+    'ni-reason': (el) => { closeModal(); logOutcome('not_interested', { note: el.dataset.r, dnc: el.dataset.dnc === '1' }); },
     yes: () => yesModal(),
     'yes-wf': () => { yesDraftFromForm(); S.redrawYes(); },
     copy: (el) => copy(el.dataset.text),
@@ -1404,7 +1514,11 @@
     'deal-cancel': (el) => { if (confirm('Cancel this deal? Points and commission will be removed from the rep.')) adminAction(`/api/admin/deals/${el.dataset.id}/cancel`, 'Deal cancelled.'); },
     task: (el) => adminAction(`/api/admin/deals/${el.dataset.deal}/workflow/${el.dataset.wf}`, null, { taskIndex: Number(el.dataset.i), done: el.checked }),
     'wf-live': (el) => adminAction(`/api/admin/deals/${el.dataset.deal}/workflow/${el.dataset.wf}`, '✅ Workflow is live!', { status: 'live' }),
-    'rep-payout': (el) => { if (confirm(`Confirm you've paid ${el.dataset.name} ${money(el.dataset.amt)}?`)) adminAction(`/api/admin/reps/${el.dataset.id}/payout`, `💸 ${esc(el.dataset.name)}'s payout recorded.`); },
+    'rep-payout': (el) => { if (confirm(`Confirm you've paid ${el.dataset.name} ${money(el.dataset.amt)}?`)) adminAction(`/api/admin/reps/${el.dataset.id}/payout`, `💸 ${esc(el.dataset.name)}'s payout recorded.`, { method: S.admin.cashappOpened === el.dataset.id ? 'cashapp' : 'manual' }); },
+    'cashapp-open': (el) => { S.admin.cashappOpened = el.dataset.id; window.open(el.href, '_blank', 'noopener'); setTimeout(() => toast(`After sending ${money(el.dataset.amt)} to ${esc(el.dataset.name)}, tap <b>Mark paid</b>.`, 'gold', 6000), 500); },
+    'payout-setup': async (el) => { el.disabled = true; try { const r = await api('POST', '/api/me/payout/stripe'); location.href = r.url; } catch (err) { fail(err); el.disabled = false; } },
+    'payout-dashboard': async () => { try { const r = await api('POST', '/api/me/payout/dashboard'); window.open(r.url, '_blank', 'noopener'); } catch (err) { fail(err); } },
+    'deal-paynow': (el) => adminAction(`/api/admin/deals/${el.dataset.id}/pay-now`, '⚡ Payout attempted. Check the status.'),
     'reset-pin': async (el) => {
       const pin = prompt(`New PIN for ${el.dataset.name} (4–8 digits):`);
       if (!pin) return;
@@ -1426,9 +1540,34 @@
     'test-webhook': async () => {
       try { const r = await api('POST', '/api/admin/test-webhook'); toast(r.status === 'sent' ? '✅ Test webhook delivered' : `❌ ${esc(r.error || r.status)}`, r.status === 'sent' ? 'good' : 'bad'); } catch (err) { fail(err); }
     },
+    'ai-opener': async (el) => {
+      el.disabled = true; el.textContent = '✨ Writing…';
+      try { const r = await api('POST', `/api/leads/${S.call.lead.id}/opener`, { workflowId: S.call.selected[0] }); S.call.lead.opener = r.opener; drawCall(); } catch (err) { fail(err); el.disabled = false; el.textContent = '✨ Write my opener'; }
+    },
     'drip-stop': async () => {
       if (!confirm('Stop sending emails to this lead?')) return;
       try { const r = await api('POST', `/api/leads/${S.call.lead.id}/drip/stop`); S.call.drip = r.drip; drawCall(); toast('🛑 Emails stopped'); } catch (err) { fail(err); }
+    },
+    'push-enable': () => { closeModal(); enablePush().then(() => { if (route()[0] === 'home') render(); }).catch(fail); },
+    'test-conn': async (el) => {
+      const svc = el.dataset.svc; const out = document.getElementById(`test-${svc}`);
+      el.disabled = true; if (out) out.textContent = '⏳ Testing…';
+      try { const r = await api('POST', `/api/admin/test/${svc}`); S.admin.tests = { ...(S.admin.tests || {}), [svc]: r }; if (out) out.innerHTML = `${r.ok ? '✅' : '❌'} ${esc(r.detail)}`; } catch (err) { if (out) out.textContent = `❌ ${err.message}`; } finally { el.disabled = false; }
+    },
+    'backup-run': async () => {
+      try { const r = await api('POST', '/api/admin/backup/run'); toast(r.error ? `💾 Saved on server, but the off-server copy failed: ${esc(r.error)}` : `💾 Backup saved${r.uploaded ? ' + copied off-server' : ''}`, r.error ? 'bad' : 'good', 6000); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
+    },
+    'backup-download': async () => {
+      try {
+        const res = await fetch('/api/admin/backup/download', { headers: { Authorization: `Bearer ${S.token}` } });
+        if (!res.ok) throw new Error('Download failed');
+        const blob = await res.blob();
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || 'salesboard-backup.json';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+      } catch (err) { fail(err); }
     },
     'load-snapshots': async () => {
       try { const r = await api('GET', '/api/admin/ghl/snapshots'); S.admin.snapshots = r.snapshots; viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
@@ -1493,6 +1632,9 @@
         drawCall();
       } catch (err) { fail(err); }
     },
+    cashtag: async (fd) => {
+      try { await api('PATCH', '/api/me/payout', { cashtag: fd.get('cashtag') }); toast('💚 Cash App saved', 'good'); } catch (err) { fail(err); }
+    },
     snapshot: async (fd) => {
       try { await api('PATCH', '/api/admin/settings', { ghlSnapshotId: fd.get('ghlSnapshotId') }); S.catalog = await api('GET', '/api/catalog'); toast('✅ Template saved. New clients get built from it.', 'good'); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
     },
@@ -1507,6 +1649,7 @@
     },
     settings: async (fd) => {
       const body = Object.fromEntries(fd);
+      body.autoPayouts = fd.get('autoPayouts') === 'on';
       body.commissionRate = Number(body.commissionPct) / 100;
       delete body.commissionPct;
       try {

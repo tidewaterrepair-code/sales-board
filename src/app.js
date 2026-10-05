@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const crypto = require('node:crypto');
 const { id } = require('./db');
 const auth = require('./auth');
 const { INDUSTRIES, getIndustry } = require('./industries');
@@ -13,6 +14,10 @@ const demo = require('./demo');
 const drip = require('./drip');
 const { profitFor } = require('./pricing');
 const provision = require('./provision');
+const ai = require('./ai');
+const payouts = require('./payouts');
+const push = require('./push');
+const backup = require('./backup');
 const { AI_ADDON, TASK_OWNERS } = require('./workflows');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -35,19 +40,35 @@ const DEFAULT_SETTINGS = {
   businessAddress: '',
   emailDailyCap: 0, // 0 = provider's free-tier default
   timezone: 'America/New_York', // used for new client accounts
+  aiMinutesIncluded: 600, // AI receptionist minutes included in the monthly price
   ghlSnapshotId: '', // your GoHighLevel template (picked in Manager → 🚀 Launch)
   clientLoginUrl: '', // where clients log in, e.g. https://app.yourdomain.com
+  refundPolicy: 'All sales are final. No refunds.', // shown before the client pays
+  autoPayouts: true, // pay reps automatically through Stripe when the client pays
+  payoutHoldDays: 0, // wait this many days after the client pays (0 = right away)
 };
+
+const GENERIC_SIGNALS = { no_website: '🚫 No website', few_reviews: '📉 Few reviews', low_rating: '⚠️ Low rating', no_rating: '❔ No rating yet', busy: '🔥 Busy & loved', no_phone: '📵 No phone', closed: '⛔ Not operating' };
 
 const AVATARS = ['🦊', '🐺', '🦄', '🐯', '🐼', '🦁', '🐸', '🐙', '🦅', '🐲', '🦈', '🐻', '🐵', '🦉', '🐬', '🚀'];
 const COLORS = ['#ff7a59', '#4f8cff', '#c065ff', '#ffb020', '#21c38b', '#ff4f8b', '#00b8d9', '#8bc34a'];
 const OUTCOMES = ['no_answer', 'not_interested', 'callback', 'interested'];
 
+// Retell signs webhooks as "v=<timestamp>,d=<hex HMAC-SHA256(apiKey, body + timestamp)>".
+function verifyRetell(rawBody, header, apiKey, nowMs = Date.now()) {
+  const m = /^v=(\d+),d=([0-9a-f]{64})$/i.exec(String(header || ''));
+  if (!m) return false;
+  const ts = Number(m[1]);
+  if (Math.abs(nowMs - ts) > 5 * 60000) return false;
+  const expected = crypto.createHmac('sha256', apiKey).update(rawBody + m[1]).digest('hex');
+  return crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(m[2].toLowerCase()));
+}
+
 class HttpError extends Error {
   constructor(status, message) { super(message); this.status = status; }
 }
 
-function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.now() }) {
+function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.now(), sleep, dataDir = path.join(__dirname, '..', 'data') }) {
   const settings = () => ({ ...DEFAULT_SETTINGS, ...db.settings });
   const publicUrl = () => (env.PUBLIC_URL || `http://localhost:${env.PORT || 3000}`).replace(/\/$/, '');
   const googleKey = () => env.GOOGLE_PLACES_API_KEY || '';
@@ -57,12 +78,13 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   const googleLimit = () => (env.GOOGLE_MONTHLY_LIMIT === undefined ? 1000 : Number(env.GOOGLE_MONTHLY_LIMIT) || 0);
   const monthKey = () => new Date(now()).toISOString().slice(0, 7);
   const googleUsed = () => db.data.usage.google?.[monthKey()] || 0;
-  const dripOpts = () => ({ settings: settings(), env, catalog: catalog(), publicUrl: publicUrl(), fetchImpl });
+  const dripOpts = () => ({ settings: settings(), env, catalog: catalog(), publicUrl: publicUrl(), fetchImpl, hydrate: (l) => hydrate(l) });
   const runDrips = () => drip.tick(db, { ...dripOpts(), now: now() });
+  const money = (n) => `$${Number(n || 0).toLocaleString('en-US', { minimumFractionDigits: Number(n) % 1 ? 2 : 0, maximumFractionDigits: 2 })}`;
 
   // One-button setup runs in the background; the rep's screen polls progress.
   const inflight = new Map();
-  const provisionCtx = (deal) => ({ db, deal, env, settings: settings(), catalog: catalog(), publicUrl: publicUrl(), fetchImpl, webhookUrl: webhookUrl(), save: () => db.save() });
+  const provisionCtx = (deal) => ({ db, deal, env, settings: settings(), catalog: catalog(), publicUrl: publicUrl(), fetchImpl, webhookUrl: webhookUrl(), save: () => db.save(), sleep });
   function startProvisioning(deal) {
     if (inflight.has(deal.id)) return inflight.get(deal.id);
     const p = provision.run(provisionCtx(deal))
@@ -73,6 +95,50 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     return p;
   }
   const dealOut = (d) => ({ ...setup.publicDeal(d), onboardingUrl: `${publicUrl()}/onboard/${d.onboardingToken}` });
+
+  // ---- Google data: kept in memory only, never written to disk ----
+  // Google's terms let us store place IDs, not business details. So for Google
+  // leads we save the place ID + our own notes, and look details up again when
+  // needed. Once a rep has actually talked to the business, what they confirmed
+  // (name, phone, website) is saved as our own CRM data (lead.confirmed).
+  const PLACE_TTL = 12 * 3600000;
+  const placeCache = new Map();
+  const remember = (l) => { if (l.source === 'google') placeCache.set(l.placeId, { data: l, at: now() }); };
+  const live = (lead) => { const c = placeCache.get(lead.placeId); return c && now() - c.at < PLACE_TTL ? c.data : null; };
+  const detailsLimit = () => (env.GOOGLE_DETAILS_MONTHLY_LIMIT === undefined ? 1000 : Number(env.GOOGLE_DETAILS_MONTHLY_LIMIT) || 0);
+  const detailsUsed = () => db.data.usage.googleDetails?.[monthKey()] || 0;
+  function hydrate(lead) {
+    if (!lead || lead.source !== 'google') return lead;
+    const l = live(lead);
+    if (l) return { ...lead, ...l, analysis: leadsLib.analyzeLead(l), id: lead.id, city: lead.city || l.city };
+    const c = lead.confirmed || {};
+    return { ...lead, name: c.name || 'Google business (details loading)', phone: c.phone || '', website: c.website || '', address: c.address || '', rating: null, reviews: 0, mapsUrl: '', category: getIndustry(lead.industry).label, detailsMissing: !lead.confirmed };
+  }
+  async function fetchDetails(lead, { withReviews = false } = {}) {
+    if (!googleKey() || lead.source !== 'google') return null;
+    if (detailsUsed() >= detailsLimit()) return null;
+    db.data.usage.googleDetails = db.data.usage.googleDetails || {};
+    db.data.usage.googleDetails[monthKey()] = detailsUsed() + 1;
+    db.save();
+    const r = await leadsLib.getPlaceDetails({ apiKey: googleKey(), placeId: lead.placeId, industryKey: lead.industry, city: lead.city, withReviews, fetchImpl });
+    remember(r.lead);
+    return r;
+  }
+  async function ensureDetails(leads, max = 25) {
+    const missing = leads.filter((l) => l.source === 'google' && !live(l) && !l.confirmed).slice(0, max);
+    for (let i = 0; i < missing.length; i += 5) {
+      await Promise.all(missing.slice(i, i + 5).map((l) => fetchDetails(l).catch((err) => console.error('[places]', err.message))));
+    }
+  }
+  // The rep spoke with them, so the business details are now our own records.
+  function confirmLead(lead) {
+    const h = hydrate(lead);
+    if (lead.source === 'google' && h.name && !h.detailsMissing) lead.confirmed = { name: h.name, phone: h.phone, website: h.website, address: h.address, at: now() };
+  }
+
+  // ---- Do-not-call list (stored as one-way hashes, not raw numbers) ----
+  const phoneKey = (p) => { const d = String(p || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, ''); return d.length >= 7 ? crypto.createHash('sha256').update(`dnc:${d}`).digest('hex').slice(0, 32) : null; };
+  const isDnc = (l) => db.data.dnc.some((x) => (x.placeId && x.placeId === l.placeId) || (x.phone && x.phone === phoneKey(l.phone)));
 
   function catalog() {
     return WORKFLOWS.map((w) => {
@@ -109,7 +175,62 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     db.save();
     deal.webhook = await setup.sendWebhook({ url: webhookUrl(), secret: env.WEBHOOK_SECRET, event: 'deal.paid', deal, publicUrl: publicUrl(), fetchImpl });
     db.save();
+    await attemptPayout(deal).catch((err) => console.error('[payout]', err.message));
     return deal;
+  }
+
+  // ---- Rep commission payouts (one time, from the setup fee) ----
+  const payCtx = () => ({ env, fetchImpl, publicUrl: publicUrl() });
+  async function refreshRepStripe(rep) {
+    if (!rep.stripeAccountId || !env.STRIPE_SECRET_KEY) return rep;
+    const st = await payouts.accountStatus(payCtx(), rep.stripeAccountId);
+    rep.payoutsEnabled = st.payoutsEnabled && st.transfers;
+    rep.stripeDetailsSubmitted = st.detailsSubmitted;
+    db.save();
+    return rep;
+  }
+  async function attemptPayout(deal, { force = false } = {}) {
+    if (deal.commissionStatus !== 'earned' || !env.STRIPE_SECRET_KEY) return null;
+    if (!force && settings().autoPayouts === false) return null;
+    const holdMs = (Number(settings().payoutHoldDays) || 0) * 86400000;
+    if (!force && deal.paidAt && now() - deal.paidAt < holdMs) return null;
+    const rep = db.users.find((u) => u.id === deal.repId);
+    if (!rep?.stripeAccountId) return null;
+    if (!rep.payoutsEnabled) await refreshRepStripe(rep).catch(() => null);
+    if (!rep.payoutsEnabled) return null;
+    const r = await payouts.payCommission(payCtx(), deal, rep).catch((err) => ({ status: 'failed', detail: err.message }));
+    deal.commissionPayout = { ...(deal.commissionPayout || {}), method: 'stripe', status: r.status, instant: Boolean(r.instant), detail: r.detail, at: now() };
+    if (r.status === 'sent') {
+      deal.commissionStatus = 'paid_out';
+      deal.paidOutAt = now();
+      notify(rep, { title: '⚡ You got paid!', body: `${money(deal.commission)} commission for ${deal.business.name} is on its way to your card.`, url: '/#/money' });
+    }
+    db.save();
+    return r;
+  }
+
+  // ---- Phone notifications ----
+  const pushSubject = () => (/^https:\/\//.test(publicUrl()) ? publicUrl() : `mailto:${settings().fromEmail || 'admin@example.com'}`);
+  const notify = (user, payload) => push.notifyUser({ db, user, payload, subject: pushSubject(), fetchImpl }).catch((err) => console.error('[push]', err.message));
+  async function runReminders() {
+    let n = 0;
+    for (const lead of db.leads) {
+      if (lead.status !== 'callback' || !lead.callbackAt || lead.callbackAt > now()) continue;
+      if (lead.callbackNotifiedAt && lead.callbackNotifiedAt >= lead.callbackAt) continue;
+      const rep = db.users.find((u) => u.id === lead.repId);
+      lead.callbackNotifiedAt = now();
+      if (rep?.pushSubs?.length) { await notify(rep, { title: '⏰ Callback time!', body: `Call back ${hydrate(lead).name} now.`, url: `/#/call/${lead.id}` }); n++; }
+    }
+    if (n) db.save();
+    return n;
+  }
+  async function sweepPayouts() {
+    let n = 0;
+    for (const d of db.deals.filter((x) => x.commissionStatus === 'earned' && x.status !== 'cancelled')) {
+      const r = await attemptPayout(d);
+      if (r?.status === 'sent') n++;
+    }
+    return n;
   }
 
   function refreshDealStatus(deal) {
@@ -191,6 +312,9 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       paid: Boolean(deal.paidAt),
       submitted: Boolean(deal.onboarding),
       loginUrl: deal.ghl?.userId && settings().clientLoginUrl ? settings().clientLoginUrl : '',
+      refundPolicy: settings().refundPolicy,
+      billing: deal.billing || 'monthly',
+      yearlyTotal: deal.yearlyTotal || 0,
       fields,
     };
   }, { public: true });
@@ -231,6 +355,29 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     return { received: true };
   }, { public: true });
 
+  // Retell reports every finished AI receptionist call, so we can track the
+  // minutes each client uses against what their plan includes.
+  route('POST', '/api/hooks/retell', ({ raw, headers }) => {
+    if (!env.RETELL_API_KEY) throw new HttpError(400, 'Retell not configured');
+    if (!verifyRetell(raw, headers['x-retell-signature'], env.RETELL_API_KEY, now())) throw new HttpError(401, 'Bad signature');
+    const evt = JSON.parse(raw);
+    if (evt.event !== 'call_ended') return { ok: true };
+    const deal = db.deals.find((d) => d.retell?.agentId && d.retell.agentId === evt.call?.agent_id);
+    if (!deal) return { ok: true };
+    const month = monthKey();
+    const u = deal.aiUsage && deal.aiUsage.month === month ? deal.aiUsage : { month, seconds: 0, calls: 0, alerted: false };
+    u.seconds += Math.round((Number(evt.call.duration_ms) || 0) / 1000);
+    u.calls += 1;
+    const included = Number(settings().aiMinutesIncluded) || 600;
+    if (!u.alerted && u.seconds / 60 >= included * 0.8) {
+      u.alerted = true;
+      u.alertedAt = now();
+    }
+    deal.aiUsage = u;
+    db.save();
+    return { ok: true };
+  }, { public: true });
+
   // Your automation platform reports back when a workflow is live.
   route('POST', '/api/hooks/provisioning', ({ body, headers }) => {
     if (!env.WEBHOOK_SECRET || headers['x-salesboard-secret'] !== env.WEBHOOK_SECRET) throw new HttpError(401, 'Bad secret');
@@ -250,6 +397,56 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   // ---- logged in ----
   route('GET', '/api/me', ({ user }) => ({ user: safeUser(user), stats: game.repStats(db, user.id, settings(), now()), settings: publicSettings() }));
 
+  // ---- Notifications ----
+  route('GET', '/api/push/key', () => ({ publicKey: push.vapidKeys(db).publicKey }));
+  route('POST', '/api/push/subscribe', ({ body, user }) => {
+    const sub = body.subscription || {};
+    if (!/^https:\/\//.test(sub.endpoint || '') || !sub.keys?.p256dh || !sub.keys?.auth) throw new HttpError(400, 'That notification subscription looks wrong.');
+    user.pushSubs = (user.pushSubs || []).filter((x) => x.endpoint !== sub.endpoint);
+    user.pushSubs.push({ endpoint: String(sub.endpoint).slice(0, 1000), keys: { p256dh: String(sub.keys.p256dh), auth: String(sub.keys.auth) }, at: now() });
+    user.pushSubs = user.pushSubs.slice(-5);
+    db.save();
+    return { ok: true, devices: user.pushSubs.length };
+  });
+  route('POST', '/api/push/test', async ({ user }) => {
+    const sent = await notify(user, { title: '🔔 Notifications are on!', body: 'You\'ll get a buzz for callbacks and payouts.', url: '/#/home' });
+    if (!sent) throw new HttpError(400, 'No device is set up for notifications yet.');
+    return { sent };
+  });
+
+  // ---- How I get paid ----
+  const payoutInfo = (u) => ({
+    cashtag: u.cashtag || '',
+    stripeAvailable: Boolean(env.STRIPE_SECRET_KEY),
+    stripe: { started: Boolean(u.stripeAccountId), ready: Boolean(u.payoutsEnabled), detailsSubmitted: Boolean(u.stripeDetailsSubmitted) },
+    autoPayouts: settings().autoPayouts !== false,
+    holdDays: Number(settings().payoutHoldDays) || 0,
+  });
+  route('GET', '/api/me/payout', async ({ user }) => {
+    if (user.stripeAccountId && !user.payoutsEnabled) await refreshRepStripe(user).catch(() => null);
+    return payoutInfo(user);
+  });
+  route('PATCH', '/api/me/payout', ({ body, user }) => {
+    const tag = payouts.normalizeCashtag(body.cashtag);
+    if (tag === null) throw new HttpError(400, 'A $cashtag is letters, numbers, - or _ (like $MariaSells).');
+    user.cashtag = tag;
+    db.save();
+    return payoutInfo(user);
+  });
+  route('POST', '/api/me/payout/stripe', async ({ user }) => {
+    if (!env.STRIPE_SECRET_KEY) throw new HttpError(400, 'Instant pay isn\'t turned on yet. Ask your manager to connect Stripe.');
+    try {
+      if (!user.stripeAccountId) { user.stripeAccountId = await payouts.createRepAccount(payCtx(), user); db.save(); }
+      return { url: await payouts.onboardingLink(payCtx(), user.stripeAccountId) };
+    } catch (err) {
+      throw new HttpError(502, /connect/i.test(err.message) ? 'Your manager needs to turn on Stripe Connect first (guide Part 7b).' : `Stripe said: ${err.message}`);
+    }
+  });
+  route('POST', '/api/me/payout/dashboard', async ({ user }) => {
+    if (!user.stripeAccountId || !env.STRIPE_SECRET_KEY) throw new HttpError(400, 'Set up instant pay first.');
+    return { url: await payouts.dashboardLink(payCtx(), user.stripeAccountId) };
+  });
+
   const publicSettings = () => {
     const s = settings();
     return { companyName: s.companyName, commissionRate: s.commissionRate, dailyCallGoal: s.dailyCallGoal, dailyCloseGoal: s.dailyCloseGoal, defaultCity: s.defaultCity, contestTitle: s.contestTitle, contestPrize: s.contestPrize, claimDays: s.claimDays };
@@ -262,6 +459,8 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     aiAddon: { monthly: AI_ADDON.monthly },
     taskOwners: TASK_OWNERS,
     connected: provision.connected(env, settings()),
+    aiOpeners: Boolean(ai.client(env)),
+    refundPolicy: settings().refundPolicy,
     objections: UNIVERSAL_OBJECTIONS,
     opener: OPENER,
     industries: INDUSTRIES,
@@ -279,22 +478,14 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     if (!city) throw new HttpError(400, 'Type a city, like "Norfolk, VA".');
     let result;
     if (googleKey() && !String(query.pageToken || '').startsWith('demo:')) {
-      // Same search within 24h is served from cache: free, and instant.
-      const cacheKey = `${industry}|${city.toLowerCase()}|${query.pageToken || ''}`;
-      const cached = db.data.searchCache[cacheKey];
-      if (cached && now() - cached.at < 86400000) {
-        result = cached.result;
-      } else {
-        if (googleUsed() >= googleLimit()) {
-          throw new HttpError(429, `This month's ${googleLimit()} free Google searches are used up. Work your current leads, add leads by hand, or ask your manager to raise GOOGLE_MONTHLY_LIMIT.`);
-        }
-        db.data.usage.google = db.data.usage.google || {};
-        db.data.usage.google[monthKey()] = googleUsed() + 1;
-        result = await leadsLib.searchGoogle({ apiKey: googleKey(), industryKey: industry, city, pageToken: query.pageToken, fetchImpl });
-        for (const [k, v] of Object.entries(db.data.searchCache)) if (now() - v.at > 86400000) delete db.data.searchCache[k];
-        db.data.searchCache[cacheKey] = { at: now(), result };
-        db.save();
+      if (googleUsed() >= googleLimit()) {
+        throw new HttpError(429, `This month's ${googleLimit()} free Google searches are used up. Work your current leads, add leads by hand, or ask your manager to raise GOOGLE_MONTHLY_LIMIT.`);
       }
+      db.data.usage.google = db.data.usage.google || {};
+      db.data.usage.google[monthKey()] = googleUsed() + 1;
+      db.save();
+      result = await leadsLib.searchGoogle({ apiKey: googleKey(), industryKey: industry, city, pageToken: query.pageToken, fetchImpl });
+      result.leads.forEach(remember); // in memory only
     } else {
       const page = Number(String(query.pageToken || 'demo:0').split(':')[1]) || 0;
       result = leadsLib.demoLeads({ industryKey: industry, city, page });
@@ -306,23 +497,26 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
         const owner = db.users.find((u) => u.id === existing.repId);
         claim = { mine: existing.repId === user.id, by: owner?.name || 'someone', leadId: existing.id, status: existing.status };
       }
-      return { ...l, analysis: leadsLib.analyzeLead(l), claim };
+      return { ...l, analysis: leadsLib.analyzeLead(l), claim, dnc: isDnc(l) };
     }).sort((a, b) => b.analysis.score - a.analysis.score);
     return { leads, nextPageToken: result.nextPageToken, demo: !googleKey() };
   });
 
-  route('POST', '/api/leads/claim', ({ body, user }) => {
+  route('POST', '/api/leads/claim', async ({ body, user }) => {
     const raw = body.lead || {};
     const manual = !raw.placeId;
     const name = String(raw.name || '').trim().slice(0, 120);
     if (!name) throw new HttpError(400, 'Business name is required.');
     const placeId = manual ? `manual_${id('m')}` : String(raw.placeId).slice(0, 200);
+    if (isDnc({ placeId, phone: raw.phone })) throw new HttpError(409, '🚫 This business asked not to be called again.');
     let lead = db.leads.find((l) => l.placeId === placeId);
     if (lead && !claimExpired(lead) && lead.repId !== user.id) {
       const owner = db.users.find((u) => u.id === lead.repId);
       throw new HttpError(409, `${owner?.name || 'Another rep'} already claimed this lead.`);
     }
-    if (lead && lead.repId === user.id && !claimExpired(lead)) return { lead };
+    if (lead && lead.repId === user.id && !claimExpired(lead)) return { lead: hydrate(lead) };
+    const isGoogle = !manual && raw.source === 'google';
+    if (isGoogle && !placeCache.has(placeId)) await fetchDetails({ placeId, source: 'google', industry: getIndustry(raw.industry).key, city: String(raw.city || '') }).catch(() => null);
     const clean = {
       placeId,
       name,
@@ -340,13 +534,18 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     };
     if (lead) {
       Object.assign(lead, { repId: user.id, status: 'new', claimedAt: now(), lastActivityAt: now() });
+    } else if (isGoogle) {
+      // Save only the place ID + our own scoring. Details live in memory.
+      const fresh = placeCache.get(placeId)?.data || clean;
+      lead = { id: id('lead'), placeId, source: 'google', industry: clean.industry, city: clean.city, analysis: leadsLib.storableAnalysis(leadsLib.analyzeLead(fresh)), repId: user.id, status: 'new', claimedAt: now(), lastActivityAt: now(), callbackAt: null, history: [] };
+      db.leads.push(lead);
     } else {
       lead = { id: id('lead'), ...clean, analysis: leadsLib.analyzeLead(clean), repId: user.id, status: 'new', claimedAt: now(), lastActivityAt: now(), callbackAt: null, history: [] };
       db.leads.push(lead);
     }
     lead.history.push({ at: now(), by: user.name, text: 'Claimed lead' });
     db.save();
-    return { lead };
+    return { lead: hydrate(lead) };
   });
 
   const myLead = (user, leadId) => {
@@ -356,12 +555,16 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     return lead;
   };
 
-  route('GET', '/api/leads/mine', ({ user }) => ({
-    leads: db.leads.filter((l) => l.repId === user.id && (l.status === 'won' || !claimExpired(l))).sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0)),
-  }));
+  route('GET', '/api/leads/mine', async ({ user }) => {
+    const mine = db.leads.filter((l) => l.repId === user.id && (l.status === 'won' || !claimExpired(l))).sort((a, b) => (b.lastActivityAt || 0) - (a.lastActivityAt || 0));
+    await ensureDetails(mine.filter((l) => l.status !== 'won' && l.status !== 'lost'));
+    return { leads: mine.map(hydrate) };
+  });
 
-  route('GET', '/api/leads/:id', ({ params, user }) => {
-    const lead = myLead(user, params.id);
+  route('GET', '/api/leads/:id', async ({ params, user }) => {
+    const raw = myLead(user, params.id);
+    await ensureDetails([raw]);
+    const lead = hydrate(raw);
     return { lead, deals: db.deals.filter((d) => d.leadId === lead.id).map(setup.publicDeal), drip: drip.summaryFor(db, lead.id) };
   });
 
@@ -375,13 +578,19 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     const already = db.events.some((e) => e.leadId === lead.id && e.userId === user.id && game.CALL_TYPES.includes(e.type) && e.createdAt >= today && !e.voided);
     const points = already ? 0 : game.POINTS[outcome];
     const labels = { no_answer: 'No answer', not_interested: 'Not interested', callback: 'Call back later', interested: 'Interested!' };
-    addEvent(user, outcome, points, { leadId: lead.id, label: outcome === 'interested' ? `got ${lead.name} interested` : '' });
+    addEvent(user, outcome, points, { leadId: lead.id, label: outcome === 'interested' ? `got a ${getIndustry(lead.industry).trade} lead interested` : '' });
+    if (outcome === 'interested' || outcome === 'callback') confirmLead(lead);
+    if (outcome === 'not_interested' && body.dnc) {
+      const h = hydrate(lead);
+      db.data.dnc.push({ placeId: lead.placeId, phone: phoneKey(h.phone), at: now(), by: user.name });
+      lead.history.push({ at: now(), by: user.name, text: '🚫 Added to the do-not-call list' });
+    }
     lead.status = { no_answer: 'called', not_interested: 'lost', callback: 'callback', interested: 'interested' }[outcome];
     lead.callbackAt = outcome === 'callback' && body.callbackAt ? Number(new Date(body.callbackAt)) || null : null;
     lead.lastActivityAt = now();
     lead.history.push({ at: now(), by: user.name, text: labels[outcome] + (body.note ? `: ${String(body.note).slice(0, 500)}` : '') });
     db.save();
-    return { lead, pointsEarned: points, stats: game.repStats(db, user.id, settings(), now()) };
+    return { lead: hydrate(lead), pointsEarned: points, stats: game.repStats(db, user.id, settings(), now()) };
   });
 
   route('POST', '/api/leads/:id/note', ({ params, body, user }) => {
@@ -391,7 +600,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     lead.history.push({ at: now(), by: user.name, text: `📝 ${text}` });
     lead.lastActivityAt = now();
     db.save();
-    return { lead };
+    return { lead: hydrate(lead) };
   });
 
   // They gave us their email → save it and start the drip.
@@ -401,6 +610,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     if (!drip.validEmail(email)) throw new HttpError(400, 'That email doesn\'t look right. Double-check it with them.');
     const firstTime = !lead.email;
     lead.email = email;
+    confirmLead(lead); // they talked to us and shared an email
     if (body.name) lead.contactName = String(body.name).trim().slice(0, 80);
     if (Array.isArray(body.pitched) && body.pitched[0]) lead.pitchedWorkflow = String(body.pitched[0]).slice(0, 60);
     lead.lastActivityAt = now();
@@ -415,7 +625,30 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     }
     lead.history.push({ at: now(), by: user.name, text: r.suppressed ? `📧 Saved ${email} (they unsubscribed before, so no emails)` : `📧 Added ${email} to the email drip` });
     db.save();
-    return { lead, drip: drip.summaryFor(db, lead.id), suppressed: Boolean(r.suppressed), pointsEarned, stats: game.repStats(db, user.id, settings(), now()) };
+    return { lead: hydrate(lead), drip: drip.summaryFor(db, lead.id), suppressed: Boolean(r.suppressed), pointsEarned, stats: game.repStats(db, user.id, settings(), now()) };
+  });
+
+  // ✨ AI-written opener based on the business's Google reviews.
+  route('POST', '/api/leads/:id/opener', async ({ params, body, user }) => {
+    const raw = myLead(user, params.id);
+    const c = ai.client(env, fetchImpl);
+    if (!c) throw new HttpError(400, 'AI openers are off. Your manager can add ANTHROPIC_API_KEY to turn them on.');
+    const limit = env.AI_OPENER_MONTHLY_LIMIT === undefined ? 1000 : Number(env.AI_OPENER_MONTHLY_LIMIT) || 0;
+    const used = db.data.usage.aiOpeners?.[monthKey()] || 0;
+    if (used >= limit) throw new HttpError(429, `This month's ${limit} AI openers are used up.`);
+    const workflow = catalog().find((w) => w.id === body.workflowId) || catalog().find((w) => w.id === raw.analysis?.recommended?.[0]) || catalog()[0];
+    let reviews = [];
+    if (raw.source === 'google') {
+      const r = await fetchDetails(raw, { withReviews: true }).catch(() => null);
+      reviews = r?.reviews || []; // used once for the prompt, never saved
+    }
+    const lead = hydrate(raw);
+    db.data.usage.aiOpeners = db.data.usage.aiOpeners || {};
+    db.data.usage.aiOpeners[monthKey()] = used + 1;
+    const text = await ai.writeOpener(c, { business: lead.name, trade: getIndustry(lead.industry).trade, city: (lead.city || '').split(',')[0], rating: lead.rating, reviewCount: lead.reviews, website: lead.website, reviews, workflow, rep: user.name });
+    raw.opener = { text, workflowId: workflow.id, at: now() };
+    db.save();
+    return { opener: raw.opener };
   });
 
   route('POST', '/api/leads/:id/drip/stop', ({ params, user }) => {
@@ -437,7 +670,10 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
 
   // ⭐ THE ONE BUTTON ⭐
   route('POST', '/api/deals', async ({ body, user }) => {
-    const lead = myLead(user, body.leadId);
+    const rawLead = myLead(user, body.leadId);
+    await ensureDetails([rawLead]);
+    confirmLead(rawLead); // they said yes, so these details are now our customer records
+    const lead = hydrate(rawLead);
     if (lead.status === 'won' && db.deals.some((d) => d.leadId === lead.id && d.status !== 'cancelled')) {
       throw new HttpError(400, 'This lead already has an active deal.');
     }
@@ -454,22 +690,27 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       areaCode: String(o.areaCode || '').replace(/\D/g, '').slice(0, 3),
       createLogin: o.createLogin !== false,
       paymentLink: o.paymentLink !== false,
+      billing: o.billing === 'yearly' ? 'yearly' : 'monthly',
     };
     const deal = setup.buildDeal({ lead, rep, workflows, contact: body.contact, notes: body.notes, commissionRate: settings().commissionRate, options, now: now() });
     db.deals.push(deal);
-    lead.status = 'won';
-    lead.lastActivityAt = now();
-    lead.history.push({ at: now(), by: user.name, text: `🎉 CLOSED: ${workflows.map((w) => w.name).join(', ')} ($${deal.setupTotal} setup)` });
+    rawLead.status = 'won';
+    rawLead.lastActivityAt = now();
+    rawLead.history.push({ at: now(), by: user.name, text: `🎉 CLOSED: ${workflows.map((w) => w.name).join(', ')} ($${deal.setupTotal} setup)` });
     addEvent(rep, 'deal', deal.points, { dealId: deal.id, leadId: lead.id, label: `closed ${workflows.map((w) => w.name).join(' + ')} for ${lead.name}` });
     if (deal.contact.email && drip.validEmail(deal.contact.email)) {
-      lead.email = deal.contact.email;
-      if (deal.contact.name) lead.contactName = deal.contact.name;
-      drip.enroll(db, { email: deal.contact.email, name: deal.contact.name, lead, deal, sequence: 'customer', by: rep.id, now: now() });
+      rawLead.email = deal.contact.email;
+      if (deal.contact.name) rawLead.contactName = deal.contact.name;
+      drip.enroll(db, { email: deal.contact.email, name: deal.contact.name, lead: rawLead, deal, sequence: 'customer', by: rep.id, now: now() });
     }
     db.save();
     startProvisioning(deal); // builds everything for the client; the screen shows live progress
     return { deal: dealOut(deal), onboardingUrl: `${publicUrl()}/onboard/${deal.onboardingToken}`, stats: game.repStats(db, rep.id, settings(), now()) };
   });
+
+  route('GET', '/api/deals/mine', ({ user }) => ({
+    deals: db.deals.filter((d) => d.repId === user.id).sort((a, b) => b.createdAt - a.createdAt).map((d) => ({ ...setup.publicDeal(d), onboardingUrl: `${publicUrl()}/onboard/${d.onboardingToken}` })),
+  }));
 
   // Live progress of the one-button setup.
   route('GET', '/api/deals/:id', ({ params, user }) => {
@@ -477,10 +718,6 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     if (!d || (d.repId !== user.id && user.role !== 'manager')) throw new HttpError(404, 'Deal not found.');
     return { deal: dealOut(d), running: inflight.has(d.id) };
   });
-
-  route('GET', '/api/deals/mine', ({ user }) => ({
-    deals: db.deals.filter((d) => d.repId === user.id).sort((a, b) => b.createdAt - a.createdAt).map((d) => ({ ...setup.publicDeal(d), onboardingUrl: `${publicUrl()}/onboard/${d.onboardingToken}` })),
-  }));
 
   route('GET', '/api/leaderboard', ({ query }) => {
     const period = ['today', 'week', 'month', 'all'].includes(query.period) ? query.period : 'week';
@@ -513,6 +750,8 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     email: drip.readiness(db, settings(), env),
     ...Object.fromEntries(Object.entries(provision.connected(env, settings())).map(([k, v]) => [`p_${k}`, v])),
     reps: db.users.filter((u) => u.role === 'rep' && u.active !== false && !u.demo).length,
+    backup: { last: db.data.system.backup || null, bucket: env.BACKUP_BUCKET || '' },
+    storage: db.kind,
     realDeals: db.deals.filter((d) => !d.demo).length,
     httpsUrl: /^https:\/\//.test(publicUrl()) && !/localhost|127\.0\.0\.1/.test(publicUrl()),
   });
@@ -523,7 +762,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     const owed = {};
     for (const d of live.filter((x) => x.commissionStatus === 'earned')) owed[d.repId] = game.round2((owed[d.repId] || 0) + d.commission);
     return {
-      users: db.users.map((u) => ({ ...safeUser(u), demo: Boolean(u.demo) })),
+      users: db.users.map((u) => ({ ...safeUser(u), demo: Boolean(u.demo), cashtag: u.cashtag || '', instantReady: Boolean(u.payoutsEnabled) })),
       deals,
       settings: settings(),
       integrations: integrations(),
@@ -536,6 +775,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
         deals: live.length,
       },
       owed,
+      alerts: db.deals.filter((d) => d.status !== 'cancelled' && d.aiUsage?.month === monthKey() && d.aiUsage.alerted).map((d) => ({ dealId: d.id, business: d.business.name, minutes: Math.round(d.aiUsage.seconds / 60), included: Number(settings().aiMinutesIncluded) || 600 })),
     };
   }, { admin: true });
 
@@ -584,11 +824,20 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     return { deal: setup.publicDeal(d) };
   }, { admin: true });
 
-  route('POST', '/api/admin/reps/:id/payout', ({ params }) => {
+  route('POST', '/api/admin/reps/:id/payout', ({ params, body, user: me }) => {
+    const method = ['cashapp', 'manual'].includes(body.method) ? body.method : 'manual';
     const deals = db.deals.filter((d) => d.repId === params.id && d.status !== 'cancelled' && d.commissionStatus === 'earned');
-    deals.forEach((d) => { d.commissionStatus = 'paid_out'; d.paidOutAt = now(); });
+    deals.forEach((d) => { d.commissionStatus = 'paid_out'; d.paidOutAt = now(); d.commissionPayout = { method, status: 'sent', detail: method === 'cashapp' ? 'Paid with Cash App' : 'Paid by manager', by: me.name, at: now() }; });
     db.save();
     return { count: deals.length, amount: game.round2(deals.reduce((s, d) => s + d.commission, 0)) };
+  }, { admin: true });
+
+  route('POST', '/api/admin/deals/:id/pay-now', async ({ params }) => {
+    const d = dealById(params.id);
+    if (d.commissionStatus !== 'earned') throw new HttpError(400, 'Commission can be paid once the client has paid.');
+    const r = await attemptPayout(d, { force: true });
+    if (!r) throw new HttpError(400, 'This rep hasn\'t finished instant-pay setup. Use Cash App or mark it paid instead.');
+    return { result: r, deal: dealOut(d) };
   }, { admin: true });
 
   route('POST', '/api/admin/deals/:id/cancel', ({ params }) => {
@@ -597,7 +846,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     d.status = 'cancelled';
     d.commissionStatus = 'cancelled';
     drip.stopFor(db, (x) => x.dealId === d.id, 'Deal cancelled');
-    db.events.forEach((e) => { if (e.dealId === d.id) e.voided = true; });
+    db.events.forEach((e) => { if (e.dealId === d.id) { e.voided = true; db.markDirty('events', e); } });
     const lead = db.leads.find((l) => l.id === d.leadId);
     if (lead) { lead.status = 'interested'; lead.history.push({ at: now(), by: 'Manager', text: 'Deal cancelled' }); }
     db.save();
@@ -637,7 +886,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       if (losers.length) throw new HttpError(400, `At ${Math.round(r * 1000) / 10}% commission these workflows would lose money on setup: ${losers.map((w) => w.name).join(', ')}.`);
       s.commissionRate = r;
     }
-    for (const k of ['dailyCallGoal', 'dailyCloseGoal', 'claimDays']) if (body[k] != null) s[k] = Math.max(0, Number.parseInt(body[k], 10) || 0);
+    for (const k of ['dailyCallGoal', 'dailyCloseGoal', 'claimDays', 'aiMinutesIncluded']) if (body[k] != null) s[k] = Math.max(0, Number.parseInt(body[k], 10) || 0);
     for (const k of ['defaultCity', 'contestTitle', 'contestPrize', 'fromName', 'businessAddress']) if (body[k] != null) s[k] = String(body[k]).trim().slice(0, 200);
     for (const k of ['fromEmail', 'replyTo']) {
       if (body[k] == null) continue;
@@ -650,6 +899,9 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       if (u && !/^https?:\/\//.test(u)) throw new HttpError(400, 'Client login link must start with https://');
       s.clientLoginUrl = u;
     }
+    if (body.refundPolicy != null) s.refundPolicy = String(body.refundPolicy).trim().slice(0, 500);
+    if (body.autoPayouts != null) s.autoPayouts = body.autoPayouts === true || body.autoPayouts === 'on' || body.autoPayouts === 'true';
+    if (body.payoutHoldDays != null) s.payoutHoldDays = Math.max(0, Math.min(120, Number.parseInt(body.payoutHoldDays, 10) || 0));
     if (body.ghlSnapshotId != null) s.ghlSnapshotId = String(body.ghlSnapshotId).trim().slice(0, 100);
     if (body.timezone != null) {
       const tz = String(body.timezone).trim();
@@ -688,7 +940,118 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     return setup.sendWebhook({ url: webhookUrl(), secret: env.WEBHOOK_SECRET, event: 'test', deal: fake, publicUrl: publicUrl(), fetchImpl });
   }, { admin: true });
 
+  // ---- Backups ----
+  route('POST', '/api/admin/backup/run', async () => backup.runBackup({ db, dir: path.join(dataDir, 'backups'), bucket: env.BACKUP_BUCKET, fetchImpl, now: now() }), { admin: true });
+  route('GET', '/api/admin/backup/download', () => {
+    const { sessions, ...data } = db.data; // never export login sessions
+    return { __download: { filename: `salesboard-backup-${new Date(now()).toISOString().slice(0, 10)}.json`, contentType: 'application/json', body: JSON.stringify(data, null, 2) } };
+  }, { admin: true });
+
   route('POST', '/api/admin/demo', () => ({ reps: demo.seedDemo(db, catalog(), settings(), now()) }), { admin: true });
+
+  // "Test connection" buttons: one cheap, read-only call per tool.
+  const TESTS = {
+    google: async () => {
+      if (!googleKey()) return { ok: false, detail: 'No GOOGLE_PLACES_API_KEY yet' };
+      const res = await fetchImpl('https://places.googleapis.com/v1/places:searchText', {
+        method: 'POST',
+        // IDs-only requests are Google's free tier, so testing costs nothing.
+        headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': googleKey(), 'X-Goog-FieldMask': 'places.id' },
+        body: JSON.stringify({ textQuery: 'coffee in Norfolk, VA', pageSize: 1 }),
+      });
+      const j = await res.json().catch(() => ({}));
+      return res.ok ? { ok: true, detail: 'Google key works' } : { ok: false, detail: j.error?.message || `HTTP ${res.status}` };
+    },
+    stripe: async () => {
+      if (!env.STRIPE_SECRET_KEY) return { ok: false, detail: 'No STRIPE_SECRET_KEY yet' };
+      const res = await fetchImpl('https://api.stripe.com/v1/balance', { headers: { Authorization: `Bearer ${env.STRIPE_SECRET_KEY}` } });
+      const j = await res.json().catch(() => ({}));
+      if (!res.ok) return { ok: false, detail: j.error?.message || `HTTP ${res.status}` };
+      const avail = (j.available || []).find((b) => b.currency === 'usd')?.amount || 0;
+      return { ok: true, detail: `${env.STRIPE_SECRET_KEY.includes('_test_') ? 'Test mode' : 'LIVE mode'} · $${(avail / 100).toFixed(2)} available for instant rep payouts` };
+    },
+    email: async () => {
+      if (env.BREVO_API_KEY) {
+        const res = await fetchImpl('https://api.brevo.com/v3/account', { headers: { 'api-key': env.BREVO_API_KEY, Accept: 'application/json' } });
+        const j = await res.json().catch(() => ({}));
+        return res.ok ? { ok: true, detail: `Brevo account: ${j.email || 'connected'}` } : { ok: false, detail: j.message || `HTTP ${res.status}` };
+      }
+      if (env.RESEND_API_KEY) {
+        const res = await fetchImpl('https://api.resend.com/domains', { headers: { Authorization: `Bearer ${env.RESEND_API_KEY}` } });
+        const j = await res.json().catch(() => ({}));
+        return res.ok ? { ok: true, detail: `Resend: ${(j.data || []).length} domain(s)` } : { ok: false, detail: j.message || `HTTP ${res.status}` };
+      }
+      return { ok: false, detail: 'No BREVO_API_KEY or RESEND_API_KEY yet' };
+    },
+    ghl: async () => {
+      if (!provision.connected(env, settings()).ghl) return { ok: false, detail: 'Needs GHL_API_KEY + GHL_COMPANY_ID' };
+      const list = await provision.listSnapshots({ env, fetchImpl, settings: settings() });
+      return { ok: true, detail: `Connected · ${list.length} template${list.length === 1 ? '' : 's'} found` };
+    },
+    retell: async () => {
+      if (!env.RETELL_API_KEY) return { ok: false, detail: 'No RETELL_API_KEY yet' };
+      const res = await fetchImpl('https://api.retellai.com/get-concurrency', { headers: { Authorization: `Bearer ${env.RETELL_API_KEY}` } });
+      const j = await res.json().catch(() => ({}));
+      return res.ok ? { ok: true, detail: 'Retell key works' } : { ok: false, detail: j.message || j.error_message || `HTTP ${res.status}` };
+    },
+    ai: async () => {
+      if (!env.ANTHROPIC_API_KEY) return { ok: false, detail: 'No ANTHROPIC_API_KEY yet (optional: AI-written openers)' };
+      const client = ai.client(env, fetchImpl);
+      if (!client) return { ok: false, detail: 'Run "npm install" to add the Anthropic SDK' };
+      const m = await client.models.retrieve(ai.MODEL);
+      return { ok: true, detail: `Claude ready (${m.display_name || ai.MODEL})` };
+    },
+  };
+  route('POST', '/api/admin/test/:service', async ({ params }) => {
+    const t = TESTS[params.service];
+    if (!t) throw new HttpError(404, 'Unknown service');
+    try { return await t(); } catch (err) { return { ok: false, detail: err.message }; }
+  }, { admin: true });
+
+  // 📈 What's actually working: close rates by business type and lead signal,
+  // best hours to call, and the bundles that sell.
+  function insights() {
+    const tz = settings().timezone || 'America/New_York';
+    const hourOf = (ts) => Number(new Intl.DateTimeFormat('en-US', { hour: 'numeric', hour12: false, timeZone: tz }).format(new Date(ts))) % 24;
+    const won = new Set(db.deals.filter((d) => d.status !== 'cancelled').map((d) => d.leadId));
+    const rate = (a, b) => (b ? Math.round((a / b) * 1000) / 10 : 0);
+    const byIndustry = {};
+    const bySignal = {};
+    for (const l of db.leads) {
+      const ind = (byIndustry[l.industry] ||= { leads: 0, won: 0 });
+      ind.leads++;
+      if (won.has(l.id)) ind.won++;
+      for (const sig of l.analysis?.signals || []) {
+        const sg = (bySignal[sig.key] ||= { leads: 0, won: 0, label: GENERIC_SIGNALS[sig.key] || sig.key });
+        sg.leads++;
+        if (won.has(l.id)) sg.won++;
+      }
+    }
+    const hours = Array.from({ length: 24 }, (_, h) => ({ hour: h, calls: 0, good: 0 }));
+    for (const e of db.events) {
+      if (e.voided || !game.CALL_TYPES.includes(e.type)) continue;
+      const h = hours[hourOf(e.createdAt)];
+      h.calls++;
+      if (e.type === 'interested' || e.type === 'callback') h.good++;
+    }
+    const scoredHours = hours.filter((h) => h.calls >= 10).map((h) => ({ ...h, rate: rate(h.good, h.calls) })).sort((a, b) => b.rate - a.rate);
+    const bundles = {};
+    for (const d of db.deals.filter((x) => x.status !== 'cancelled')) {
+      const key = d.workflows.map((w) => w.id).sort().join('+');
+      const b = (bundles[key] ||= { names: d.workflows.map((w) => `${w.emoji} ${w.name}`).join(' + '), deals: 0, setup: 0 });
+      b.deals++;
+      b.setup += d.setupTotal;
+    }
+    return {
+      byIndustry: Object.entries(byIndustry).map(([k, v]) => ({ key: k, label: getIndustry(k).label, emoji: getIndustry(k).emoji, ...v, rate: rate(v.won, v.leads) })).sort((a, b) => b.rate - a.rate || b.leads - a.leads),
+      bySignal: Object.entries(bySignal).map(([k, v]) => ({ key: k, ...v, rate: rate(v.won, v.leads) })).sort((a, b) => b.rate - a.rate),
+      bestHours: scoredHours.slice(0, 3),
+      hours,
+      bundles: Object.values(bundles).sort((a, b) => b.deals - a.deals).slice(0, 8),
+    };
+  }
+  route('GET', '/api/admin/insights', () => insights(), { admin: true });
+  route('GET', '/api/insights/best-time', () => ({ bestHours: insights().bestHours.slice(0, 2) }));
 
   route('GET', '/api/admin/ghl/snapshots', async () => {
     if (!provision.connected(env, settings()).ghl) throw new HttpError(400, 'Connect GoHighLevel first (GHL_API_KEY + GHL_COMPANY_ID).');
@@ -773,6 +1136,11 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       if (!match.opts.public && !user) throw new HttpError(401, 'Please log in.');
       if (match.opts.admin && user.role !== 'manager') throw new HttpError(403, 'Managers only.');
       const result = await match.handler({ req, params, query: Object.fromEntries(url.searchParams), body, raw, headers: req.headers, token, user });
+      if (result && result.__download) {
+        const d = result.__download;
+        res.writeHead(200, { 'Content-Type': d.contentType, 'Content-Disposition': `attachment; filename="${d.filename}"`, 'Cache-Control': 'no-store' });
+        return res.end(d.body);
+      }
       send(res, 200, result);
     } catch (err) {
       const status = err.status || 500;
@@ -801,7 +1169,16 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     });
   }
 
-  return { handle, catalog, settings, runDrips, waitForProvisioning: (dealId) => inflight.get(dealId) || Promise.resolve() };
+  // After a restart, finish any setup that was interrupted mid-way.
+  function resumeProvisioning() {
+    const stuck = db.deals.filter((d) => d.provisioning?.status === 'running' && d.status !== 'cancelled' && !inflight.has(d.id));
+    stuck.forEach((d) => startProvisioning(d));
+    return stuck.length;
+  }
+
+  const runBackupIfDue = () => (backup.due(db, now()) ? backup.runBackup({ db, dir: path.join(dataDir, 'backups'), bucket: env.BACKUP_BUCKET, fetchImpl, now: now() }) : null);
+
+  return { handle, catalog, settings, runDrips, resumeProvisioning, sweepPayouts, runReminders, runBackupIfDue, waitForProvisioning: (dealId) => inflight.get(dealId) || Promise.resolve() };
 }
 
 function readBody(req) {

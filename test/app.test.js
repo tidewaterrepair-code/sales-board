@@ -308,19 +308,61 @@ test('email drip waits (does not drop) until provider + sender are set up', asyn
   assert.strictEqual(db.data.drips[0].status, 'active');
 });
 
-test('google searches stop at the free monthly limit and repeat searches use the cache', async () => {
+test('google searches stop at the free monthly limit', async () => {
   let calls = 0;
   const fetchImpl = async () => { calls++; return { ok: true, json: async () => ({ places: [] }) }; };
   const { call } = setup({ GOOGLE_PLACES_API_KEY: 'k', GOOGLE_MONTHLY_LIMIT: '2' }, fetchImpl);
   const { rep } = await managerAndRep(call);
   const q = (city) => call('GET', `/api/leads/search?industry=hvac&city=${encodeURIComponent(city)}`, { token: rep });
   assert.strictEqual((await q('Norfolk, VA')).status, 200);
-  assert.strictEqual((await q('Norfolk, VA')).status, 200); // cached
-  assert.strictEqual(calls, 1);
   assert.strictEqual((await q('Suffolk, VA')).status, 200);
-  const blocked = await q('Hampton, VA');
-  assert.strictEqual(blocked.status, 429);
+  assert.strictEqual((await q('Hampton, VA')).status, 429);
   assert.strictEqual(calls, 2);
+});
+
+test('google leads: only the place ID is saved; details come back from Google; confirmed details are kept', async () => {
+  const place = { id: 'ChIJ_test', displayName: { text: 'Real HVAC Co' }, formattedAddress: '9 Main St, Norfolk, VA 23510, USA', nationalPhoneNumber: '(757) 555-0177', websiteUri: '', rating: 3.9, userRatingCount: 8, businessStatus: 'OPERATIONAL' };
+  const calls = [];
+  const fetchImpl = async (url) => {
+    calls.push(url);
+    if (url.includes('searchText')) return { ok: true, json: async () => ({ places: [place] }) };
+    if (url.includes('/places/ChIJ_test')) return { ok: true, json: async () => place };
+    return { ok: true, json: async () => ({}) };
+  };
+  const db = new DB(null);
+  const env = { GOOGLE_PLACES_API_KEY: 'k' };
+  let call = client(createApp({ db, env, fetchImpl }));
+  const { rep } = await managerAndRep(call);
+  const found = (await call('GET', '/api/leads/search?industry=hvac&city=Norfolk%2C%20VA', { token: rep })).body.leads[0];
+  const claimed = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: found } })).body.lead;
+  assert.strictEqual(claimed.name, 'Real HVAC Co'); // shown to the rep
+  const saved = db.leads[0];
+  assert.strictEqual(saved.placeId, 'ChIJ_test');
+  for (const k of ['name', 'phone', 'address', 'website', 'rating', 'reviews']) assert.strictEqual(saved[k], undefined, `${k} must not be stored`);
+  assert.ok(!JSON.stringify(saved).includes('555-0177'));
+  assert.ok(!JSON.stringify(saved.analysis).includes('8 reviews'));
+
+  // "Restart": a new app instance has no memory, so it asks Google again.
+  call = client(createApp({ db, env, fetchImpl }));
+  const reopened = (await call('GET', `/api/leads/${saved.id}`, { token: rep })).body.lead;
+  assert.strictEqual(reopened.phone, '(757) 555-0177');
+  assert.ok(calls.some((u) => u.includes('/places/ChIJ_test')));
+  assert.strictEqual(db.data.usage.googleDetails[new Date().toISOString().slice(0, 7)], 1);
+
+  // After a real conversation, the confirmed details become our own records.
+  await call('POST', `/api/leads/${saved.id}/outcome`, { token: rep, body: { outcome: 'interested' } });
+  assert.strictEqual(saved.confirmed.name, 'Real HVAC Co');
+});
+
+test('do-not-call: a business that asks is never claimable again', async () => {
+  const { db, call } = setup();
+  const { rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Grumpy Plumbing', phone: '(757) 555-0166', industry: 'plumber' } } })).body.lead;
+  await call('POST', `/api/leads/${lead.id}/outcome`, { token: rep, body: { outcome: 'not_interested', dnc: true } });
+  assert.strictEqual(db.data.dnc.length, 1);
+  assert.ok(!JSON.stringify(db.data.dnc).includes('555-0166'), 'stored as a hash');
+  const again = await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Grumpy Plumbing (again)', phone: '757-555-0166', industry: 'plumber' } } });
+  assert.strictEqual(again.status, 409);
 });
 
 // Fake GoHighLevel + Retell + Stripe for the one-button setup tests.
@@ -334,13 +376,14 @@ function fakeVendors({ failGhlTimes = 0 } = {}) {
     const ok = (json) => ({ ok: true, status: 200, json: async () => json });
     if (url.includes('api.stripe.com')) return ok({ url: 'https://checkout.stripe.test/s/1' });
     if (url.endsWith('/locations/')) {
-      if (ghlFails-- > 0) return { ok: false, status: 503, json: async () => ({ message: 'Service busy' }) };
+      if (ghlFails-- > 0) return { ok: false, status: 422, json: async () => ({ message: 'Service busy' }) };
       return ok({ id: 'loc_123' });
     }
     if (url.endsWith('/oauth/locationToken')) return ok({ access_token: 'loc_token' });
     if (url.includes('/customValues') && opts.method === 'GET') return ok({ customValues });
     if (url.includes('/customValues')) return ok({ customValue: { id: 'cvX' } });
     if (url.endsWith('/users/')) return ok({ id: 'user_1' });
+    if (url.endsWith('/contacts/upsert')) return ok({ contact: { id: 'contact_owner' } });
     if (url.endsWith('/create-retell-llm')) return ok({ llm_id: 'llm_1' });
     if (url.endsWith('/create-agent')) return ok({ agent_id: 'agent_1' });
     if (url.endsWith('/create-phone-number')) return ok({ phone_number: '+17575550142' });
@@ -373,7 +416,9 @@ test('one button: picks options and fully sets up the client (payment, account, 
 
   const deal = db.deals[0];
   const st = Object.fromEntries(deal.provisioning.steps.map((s) => [s.key, s.status]));
-  assert.deepStrictEqual(st, { deal: 'done', payment: 'done', account: 'done', settings: 'done', login: 'done', ai: 'done', welcome: 'practice', automation: 'skipped' });
+  assert.deepStrictEqual(st, { deal: 'done', payment: 'done', account: 'done', settings: 'done', login: 'done', reminders: 'done', ai: 'done', welcome: 'practice', automation: 'skipped' });
+  const upsert = v.calls.find((c) => c.url.endsWith('/contacts/upsert'));
+  assert.deepStrictEqual(upsert.body.tags, ['sb-setup-pending', 'sb-owner']);
   assert.strictEqual(deal.provisioning.status, 'practice'); // only the welcome email is waiting on an email provider
   assert.strictEqual(deal.paymentUrl, 'https://checkout.stripe.test/s/1');
 
@@ -419,6 +464,7 @@ test('one button: picks options and fully sets up the client (payment, account, 
   assert.strictEqual(patch.body.general_tools.find((t) => t.type === 'transfer_call').transfer_destination.number, '+17575550199');
   assert.ok(v.calls.some((c) => c.body?.name === 'sb_hours' && c.body.value === 'Mon-Fri 8-5'));
   assert.ok(ai.tasks.find((t) => t.by === 'onboarding').done);
+  assert.ok(v.calls.some((c) => c.method === 'DELETE' && c.url.includes('/contacts/') && c.url.endsWith('/tags')));
 });
 
 test('one button in practice mode: no vendor calls, every step explains what to connect', async () => {
@@ -477,4 +523,333 @@ test('manager can pick the GoHighLevel template from a list', async () => {
   assert.strictEqual(db.settings.ghlSnapshotId, 'snap_9');
   const ov = await call('GET', '/api/admin/overview', { token: manager });
   assert.strictEqual(ov.body.integrations.p_ghlSnapshot, true);
+});
+
+test('setup never builds a second account when an earlier try already did', async () => {
+  const v = fakeVendors();
+  const fetchImpl = async (url, opts) => {
+    if (url.includes('/locations/search')) return { ok: true, status: 200, json: async () => ({ locations: [{ id: 'loc_existing', name: `Twice Co [SB-${dealIdTail}]` }] }) };
+    return v.fetchImpl(url, opts);
+  };
+  let dealIdTail = '';
+  const { db, app, call } = setup({ ...VENDOR_ENV, RETELL_API_KEY: '' }, async (url, opts) => fetchImpl(url, opts));
+  const { rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Twice Co', phone: '7575550133', industry: 'salon' } } })).body.lead;
+  // Pretend the deal id is known before setup searches (tail of the id is in the account name).
+  const origPush = db.deals.push.bind(db.deals);
+  db.deals.push = (d) => { dealIdTail = d.id.slice(-6); return origPush(d); };
+  const r = await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['booking_noshow'] } });
+  await app.waitForProvisioning(r.body.deal.id);
+  assert.strictEqual(db.deals[0].ghl.locationId, 'loc_existing');
+  assert.ok(!v.calls.some((c) => c.url.endsWith('/locations/') && c.method === 'POST'));
+});
+
+test('temporary vendor errors (429/5xx) are retried automatically', async () => {
+  let n = 0;
+  const v = fakeVendors();
+  const fetchImpl = async (url, opts) => {
+    if (url.endsWith('/locations/') && n++ < 2) return { ok: false, status: 429, json: async () => ({ message: 'Too many requests' }) };
+    return v.fetchImpl(url, opts);
+  };
+  const db = new DB(null);
+  const app = createApp({ db, env: { ...VENDOR_ENV, RETELL_API_KEY: '' }, fetchImpl, sleep: async () => {} });
+  const call = client(app);
+  const { rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Busy Co', phone: '7575550144', industry: 'salon' } } })).body.lead;
+  const r = await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['booking_noshow'] } });
+  await app.waitForProvisioning(r.body.deal.id);
+  assert.strictEqual(db.deals[0].provisioning.steps.find((st) => st.key === 'account').status, 'done');
+});
+
+test('interrupted setups resume after a restart', async () => {
+  const v = fakeVendors();
+  const db = new DB(null);
+  let call = client(createApp({ db, env: {}, fetchImpl: v.fetchImpl }));
+  const { rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Crash Co', phone: '7575550155', industry: 'hvac' } } })).body.lead;
+  const r = await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['missed_call_textback'] } });
+  // Simulate the server dying mid-setup.
+  const deal = db.deals.find((d) => d.id === r.body.deal.id);
+  await new Promise((res) => setTimeout(res, 20));
+  deal.provisioning.status = 'running';
+  deal.provisioning.steps = deal.provisioning.steps.slice(0, 2).map((st, i) => (i === 1 ? { ...st, status: 'working' } : st));
+  const app2 = createApp({ db, env: VENDOR_ENV, fetchImpl: v.fetchImpl });
+  assert.strictEqual(app2.resumeProvisioning(), 1);
+  await app2.waitForProvisioning(deal.id);
+  assert.notStrictEqual(deal.provisioning.status, 'running');
+  assert.strictEqual(deal.provisioning.steps.find((st) => st.key === 'account').status, 'done');
+});
+
+test('test-connection buttons report clearly', async () => {
+  const fetchImpl = async (url) => {
+    if (url.includes('api.stripe.com/v1/balance')) return { ok: true, status: 200, json: async () => ({ available: [{ currency: 'usd', amount: 12345 }] }) };
+    if (url.includes('places:searchText')) return { ok: false, status: 403, json: async () => ({ error: { message: 'API key not valid' } }) };
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  const { call } = setup({ STRIPE_SECRET_KEY: 'sk_test_x', GOOGLE_PLACES_API_KEY: 'bad' }, fetchImpl);
+  const { manager } = await managerAndRep(call);
+  const stripe = await call('POST', '/api/admin/test/stripe', { token: manager });
+  assert.strictEqual(stripe.body.ok, true);
+  assert.match(stripe.body.detail, /\$123\.45/);
+  const google = await call('POST', '/api/admin/test/google', { token: manager });
+  assert.strictEqual(google.body.ok, false);
+  assert.match(google.body.detail, /not valid/);
+  const retell = await call('POST', '/api/admin/test/retell', { token: manager });
+  assert.strictEqual(retell.body.ok, false);
+});
+
+test('AI opener: calls Claude with the right settings and saves only the opener', async () => {
+  const sent = [];
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    if (u.includes('api.anthropic.com/v1/messages')) {
+      sent.push({ body: JSON.parse(opts.body), headers: opts.headers });
+      const msg = { id: 'msg_1', type: 'message', role: 'assistant', model: 'claude-opus-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: 'Hi, is this Sunny Salon? I saw folks love you but mention it is hard to book, so I had an idea.' }], usage: { input_tokens: 10, output_tokens: 20 } };
+      return new Response(JSON.stringify(msg), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const { db, call } = setup({ ANTHROPIC_API_KEY: 'sk-ant-test' }, fetchImpl);
+  const { rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Sunny Salon', phone: '7575550188', industry: 'salon', reviews: 12, rating: 4.1 } } })).body.lead;
+  const r = await call('POST', `/api/leads/${lead.id}/opener`, { token: rep, body: { workflowId: 'booking_noshow' } });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+  assert.match(r.body.opener.text, /Sunny Salon/);
+  const b = sent[0].body;
+  assert.strictEqual(b.model, 'claude-opus-5-5');
+  assert.strictEqual(b.fallbacks, 'default');
+  assert.strictEqual(b.output_config.effort, 'low');
+  assert.match(new Headers(sent[0].headers).get('anthropic-beta') || '', /server-side-fallback-2026-07-01/);
+  assert.match(b.messages[0].content, /Online Booking/);
+  assert.strictEqual(db.leads[0].opener.workflowId, 'booking_noshow');
+});
+
+function fakeStripe({ insufficientTimes = 0, instantAvailable = 100000 } = {}) {
+  const calls = [];
+  let insufficient = insufficientTimes;
+  const fetchImpl = async (url, opts = {}) => {
+    const u = String(url);
+    const headers = opts.headers || {};
+    calls.push({ url: u, method: opts.method || 'GET', body: opts.body ? new URLSearchParams(opts.body) : null, account: headers['Stripe-Account'], idem: headers['Idempotency-Key'] });
+    const ok = (j) => ({ ok: true, status: 200, json: async () => j });
+    if (u.endsWith('/v1/accounts') && opts.method === 'POST') return ok({ id: 'acct_rep1' });
+    if (u.endsWith('/v1/account_links')) return ok({ url: 'https://connect.stripe.test/onboard' });
+    if (u.includes('/v1/accounts/acct_rep1') && !u.includes('login_links')) return ok({ id: 'acct_rep1', payouts_enabled: true, details_submitted: true, capabilities: { transfers: 'active' } });
+    if (u.endsWith('/v1/transfers')) {
+      if (insufficient-- > 0) return { ok: false, status: 400, json: async () => ({ error: { code: 'balance_insufficient', message: 'Insufficient funds' } }) };
+      return ok({ id: 'tr_1' });
+    }
+    if (u.includes('/v1/balance')) return ok({ instant_available: [{ currency: 'usd', amount: instantAvailable }] });
+    if (u.endsWith('/v1/payouts')) return ok({ id: 'po_1' });
+    if (u.includes('/v1/checkout/sessions')) return ok({ url: 'https://checkout.stripe.test/s' });
+    return ok({});
+  };
+  return { calls, fetchImpl };
+}
+
+test('instant payouts: rep links a card, client pays, commission lands instantly (once)', async () => {
+  const st = fakeStripe();
+  const { db, call } = setup({ STRIPE_SECRET_KEY: 'sk_test_x' }, st.fetchImpl);
+  const { manager, rep, repId } = await managerAndRep(call);
+  const link = await call('POST', '/api/me/payout/stripe', { token: rep });
+  assert.strictEqual(link.body.url, 'https://connect.stripe.test/onboard');
+  const info = await call('GET', '/api/me/payout', { token: rep });
+  assert.strictEqual(info.body.stripe.ready, true);
+  assert.strictEqual(db.users.find((u) => u.id === repId).stripeAccountId, 'acct_rep1');
+
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Quick Pay Co', phone: '7575550191', industry: 'hvac' } } })).body.lead;
+  const d = (await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['missed_call_textback'] } })).body.deal;
+  await call('POST', `/api/admin/deals/${d.id}/paid`, { token: manager });
+  const deal = db.deals[0];
+  assert.strictEqual(deal.commissionStatus, 'paid_out');
+  assert.strictEqual(deal.commissionPayout.instant, true);
+  const transfer = st.calls.find((c) => c.url.endsWith('/v1/transfers'));
+  assert.strictEqual(transfer.body.get('amount'), '4470'); // 10% of $447, in cents
+  assert.strictEqual(transfer.body.get('destination'), 'acct_rep1');
+  assert.strictEqual(transfer.idem, `sb-transfer-${deal.id}`);
+  const payout = st.calls.find((c) => c.url.endsWith('/v1/payouts'));
+  assert.strictEqual(payout.body.get('method'), 'instant');
+  assert.strictEqual(payout.account, 'acct_rep1');
+  // Paying again does nothing.
+  const transfersBefore = st.calls.filter((c) => c.url.endsWith('/v1/transfers')).length;
+  await call('POST', `/api/admin/deals/${d.id}/paid`, { token: manager });
+  assert.strictEqual(st.calls.filter((c) => c.url.endsWith('/v1/transfers')).length, transfersBefore);
+});
+
+test('instant payouts wait for the client payment to clear, then send automatically', async () => {
+  const st = fakeStripe({ insufficientTimes: 1 });
+  const { db, app, call } = setup({ STRIPE_SECRET_KEY: 'sk_test_x' }, st.fetchImpl);
+  const { manager, rep } = await managerAndRep(call);
+  await call('POST', '/api/me/payout/stripe', { token: rep });
+  await call('GET', '/api/me/payout', { token: rep });
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Slow Clear Co', phone: '7575550192', industry: 'hvac' } } })).body.lead;
+  const d = (await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['review_engine'] } })).body.deal;
+  await call('POST', `/api/admin/deals/${d.id}/paid`, { token: manager });
+  assert.strictEqual(db.deals[0].commissionStatus, 'earned');
+  assert.strictEqual(db.deals[0].commissionPayout.status, 'waiting');
+  assert.strictEqual(await app.sweepPayouts(), 1);
+  assert.strictEqual(db.deals[0].commissionStatus, 'paid_out');
+});
+
+test('Cash App: reps save a $cashtag and managers record a one-tap payout', async () => {
+  const { db, call } = setup();
+  const { manager, rep, repId } = await managerAndRep(call);
+  assert.strictEqual((await call('PATCH', '/api/me/payout', { token: rep, body: { cashtag: 'bad tag!' } })).status, 400);
+  assert.strictEqual((await call('PATCH', '/api/me/payout', { token: rep, body: { cashtag: 'MariaSells' } })).body.cashtag, '$MariaSells');
+  const { cashAppLink } = require('../src/payouts');
+  assert.strictEqual(cashAppLink('$MariaSells', 44.7), 'https://cash.app/%24MariaSells/44.70');
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Cash Co', phone: '7575550193', industry: 'hvac' } } })).body.lead;
+  const d = (await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['missed_call_textback'] } })).body.deal;
+  await call('POST', `/api/admin/deals/${d.id}/paid`, { token: manager });
+  const ov = await call('GET', '/api/admin/overview', { token: manager });
+  assert.strictEqual(ov.body.users.find((u) => u.id === repId).cashtag, '$MariaSells');
+  await call('POST', `/api/admin/reps/${repId}/payout`, { token: manager, body: { method: 'cashapp' } });
+  assert.strictEqual(db.deals[0].commissionPayout.method, 'cashapp');
+  assert.strictEqual(db.deals[0].commissionStatus, 'paid_out');
+});
+
+test('checkout shows the no-refund policy and supports yearly billing', async () => {
+  const st = fakeStripe();
+  const { app, db, call } = setup({ STRIPE_SECRET_KEY: 'sk_test_x' }, st.fetchImpl);
+  const { rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Yearly Co', phone: '7575550194', industry: 'hvac' } } })).body.lead;
+  const r = await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['missed_call_textback'], options: { billing: 'yearly' } } });
+  await app.waitForProvisioning(r.body.deal.id);
+  const co = st.calls.find((c) => c.url.includes('/v1/checkout/sessions'));
+  assert.strictEqual(co.body.get('custom_text[submit][message]'), 'All sales are final. No refunds.');
+  assert.strictEqual(co.body.get('line_items[1][price_data][recurring][interval]'), 'year');
+  assert.strictEqual(co.body.get('line_items[1][price_data][unit_amount]'), String(167 * 10 * 100));
+  assert.strictEqual(db.deals[0].billing, 'yearly');
+});
+
+test('AI receptionist minutes are tracked from signed Retell webhooks, with an 80% alert', async () => {
+  const cryptoMod = require('node:crypto');
+  const v = fakeVendors();
+  const { db, app, call } = setup({ ...VENDOR_ENV, PUBLIC_URL: 'https://board.example' }, v.fetchImpl);
+  const { manager, rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Chatty Dental', phone: '7575550199', industry: 'dentist' } } })).body.lead;
+  const r = await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['ai_receptionist'] } });
+  await app.waitForProvisioning(r.body.deal.id);
+  assert.strictEqual(v.calls.find((c) => c.url.endsWith('/create-agent')).body.webhook_url, 'https://board.example/api/hooks/retell');
+  const send = (ms, sig) => {
+    const body = JSON.stringify({ event: 'call_ended', call: { agent_id: 'agent_1', duration_ms: ms } });
+    const ts = String(Date.now());
+    const d = cryptoMod.createHmac('sha256', 'key_r').update(body + ts).digest('hex');
+    return call('POST', '/api/hooks/retell', { body, headers: { 'x-retell-signature': sig || `v=${ts},d=${d}` } });
+  };
+  assert.strictEqual((await send(60000, 'v=1,d=' + '0'.repeat(64))).status, 401);
+  await send(400 * 60000);
+  assert.strictEqual(db.deals[0].aiUsage.calls, 1);
+  assert.strictEqual(db.deals[0].aiUsage.alerted, false);
+  await send(100 * 60000);
+  assert.strictEqual(db.deals[0].aiUsage.alerted, true); // 500 of 600 minutes
+  const ov = await call('GET', '/api/admin/overview', { token: manager });
+  assert.strictEqual(ov.body.alerts[0].minutes, 500);
+});
+
+test('insights show close rates and the best hours to call', async () => {
+  const { db, call } = setup();
+  const { manager } = await managerAndRep(call);
+  await call('POST', '/api/admin/demo', { token: manager });
+  const ins = (await call('GET', '/api/admin/insights', { token: manager })).body;
+  assert.ok(ins.byIndustry.length > 0);
+  assert.ok(ins.bestHours.length > 0);
+  assert.ok(ins.bundles.length > 0);
+  assert.ok(db.leads.length > 0);
+});
+
+test('web push: payload is encrypted per RFC 8291 and signed with VAPID', async () => {
+  const cryptoMod = require('node:crypto');
+  const push = require('../src/push');
+  const db = new DB(null);
+  const vapid = push.vapidKeys(db);
+  // A pretend browser subscription.
+  const ua = cryptoMod.createECDH('prime256v1');
+  const uaPublic = ua.generateKeys();
+  const auth = cryptoMod.randomBytes(16);
+  const keys = { p256dh: uaPublic.toString('base64url'), auth: auth.toString('base64url') };
+  const body = push.encrypt(JSON.stringify({ title: 'Hi' }), keys);
+  // Decrypt like a browser would.
+  const salt = body.subarray(0, 16);
+  const idlen = body[20];
+  const asPublic = body.subarray(21, 21 + idlen);
+  const ct = body.subarray(21 + idlen);
+  const shared = ua.computeSecret(asPublic);
+  const ikm = Buffer.from(cryptoMod.hkdfSync('sha256', shared, auth, Buffer.concat([Buffer.from('WebPush: info\0'), uaPublic, asPublic]), 32));
+  const cek = Buffer.from(cryptoMod.hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: aes128gcm\0'), 16));
+  const nonce = Buffer.from(cryptoMod.hkdfSync('sha256', ikm, salt, Buffer.from('Content-Encoding: nonce\0'), 12));
+  const d = cryptoMod.createDecipheriv('aes-128-gcm', cek, nonce);
+  d.setAuthTag(ct.subarray(ct.length - 16));
+  const plain = Buffer.concat([d.update(ct.subarray(0, ct.length - 16)), d.final()]);
+  assert.strictEqual(plain.subarray(0, plain.length - 1).toString(), '{"title":"Hi"}');
+  assert.strictEqual(plain[plain.length - 1], 2);
+  // VAPID JWT verifies with the public key.
+  const jwt = push.vapidJwt('https://fcm.googleapis.com/fcm/send/abc', vapid, 'mailto:a@b.co');
+  const [h, c, sig] = jwt.split('.');
+  const pub = Buffer.from(vapid.publicKey, 'base64url');
+  const key = cryptoMod.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: pub.subarray(1, 33).toString('base64url'), y: pub.subarray(33).toString('base64url') }, format: 'jwk' });
+  assert.ok(cryptoMod.verify('sha256', Buffer.from(`${h}.${c}`), { key, dsaEncoding: 'ieee-p1363' }, Buffer.from(sig, 'base64url')));
+  assert.strictEqual(JSON.parse(Buffer.from(c, 'base64url')).aud, 'https://fcm.googleapis.com');
+});
+
+test('callback reminders buzz the rep once when a callback is due', async () => {
+  const pushes = [];
+  const fetchImpl = async (url, opts = {}) => {
+    if (String(url).startsWith('https://push.example')) { pushes.push(opts.headers); return { ok: true, status: 201, json: async () => ({}) }; }
+    return { ok: true, status: 200, json: async () => ({}) };
+  };
+  let t = Date.now();
+  const db = new DB(null);
+  const app = createApp({ db, env: {}, fetchImpl, now: () => t });
+  const call = client(app);
+  const { rep } = await managerAndRep(call);
+  const cryptoMod = require('node:crypto');
+  const ua = cryptoMod.createECDH('prime256v1');
+  const sub = { endpoint: 'https://push.example/sub1', keys: { p256dh: ua.generateKeys().toString('base64url'), auth: cryptoMod.randomBytes(16).toString('base64url') } };
+  assert.strictEqual((await call('POST', '/api/push/subscribe', { token: rep, body: { subscription: sub } })).status, 200);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Later Co', phone: '7575550111', industry: 'hvac' } } })).body.lead;
+  await call('POST', `/api/leads/${lead.id}/outcome`, { token: rep, body: { outcome: 'callback', callbackAt: t + 60000 } });
+  assert.strictEqual(await app.runReminders(), 0);
+  t += 120000;
+  assert.strictEqual(await app.runReminders(), 1);
+  assert.strictEqual(await app.runReminders(), 0);
+  assert.match(pushes[0].Authorization, /^vapid t=.+, k=.+/);
+  assert.strictEqual(pushes[0]['Content-Encoding'], 'aes128gcm');
+});
+
+test('SQLite storage: saves only changes, survives restart, migrates old JSON, and backs up', async () => {
+  const fs = require('node:fs');
+  const os = require('node:os');
+  const path = require('node:path');
+  const { openDefault } = require('../src/db');
+  const backupLib = require('../src/backup');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'sb-'));
+  fs.writeFileSync(path.join(dir, 'db.json'), JSON.stringify({ users: [{ id: 'u1', name: 'Old Timer', role: 'manager' }], settings: { companyName: 'Legacy Co' }, events: [], searchCache: { x: 1 } }));
+  let db = openDefault(dir);
+  assert.strictEqual(db.kind, 'sqlite');
+  assert.strictEqual(db.users[0].name, 'Old Timer');
+  assert.ok(fs.existsSync(path.join(dir, 'db.json.migrated')));
+  db.events.push({ id: 'e1', userId: 'u1', type: 'call', points: 1, createdAt: 1 });
+  db.settings.companyName = 'New Co';
+  db.users[0].name = 'Renamed';
+  db.save(); db.flush();
+  db.events[0].voided = true; db.markDirty('events', db.events[0]);
+  db.save(); db.close();
+  db = openDefault(dir);
+  assert.strictEqual(db.users[0].name, 'Renamed');
+  assert.strictEqual(db.settings.companyName, 'New Co');
+  assert.strictEqual(db.events[0].voided, true);
+  assert.strictEqual(db.data.searchCache, undefined);
+  const st = await backupLib.runBackup({ db, dir: path.join(dir, 'backups'), now: Date.parse('2026-10-05T12:00:00Z') });
+  assert.ok(fs.existsSync(path.join(dir, 'backups', st.file)));
+  db.close();
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('my deals list is reachable (route order)', async () => {
+  const { call } = setup();
+  const { rep } = await managerAndRep(call);
+  const r = await call('GET', '/api/deals/mine', { token: rep });
+  assert.strictEqual(r.status, 200);
+  assert.deepStrictEqual(r.body.deals, []);
 });

@@ -52,7 +52,7 @@ if [ "$DOCKER" = 1 ]; then
 fi
 
 # 3. Node.js 20+
-node_ok() { has node && [ "$(node -p 'process.versions.node.split(".")[0]')" -ge 20 ]; }
+node_ok() { has node && node -e 'const [a,b]=process.versions.node.split(".").map(Number);process.exit(a>22||(a===22&&b>=5)?0:1)'; }
 if ! node_ok; then
   say "Installing Node.js (LTS) with nvm. No admin rights needed"
   export NVM_DIR="$HOME/.nvm"
@@ -64,21 +64,26 @@ if ! node_ok; then
   nvm install --lts >/dev/null
   nvm alias default 'lts/*' >/dev/null
 fi
-node_ok || die "Node.js 20+ is required. Install it from https://nodejs.org and run this again."
+node_ok || die "Node.js 22.5+ is required. Install it from https://nodejs.org and run this again."
 ok "Node.js $(node -v)"
 
-# 4. Settings (.env)
+# 4. Packages (just one: the Anthropic SDK for AI openers)
+say "Installing packages"
+npm ci --omit=dev --no-audit --no-fund >/dev/null 2>&1 || npm install --omit=dev --no-audit --no-fund >/dev/null
+ok "Packages ready"
+
+# 5. Settings (.env)
 say "Setting up your keys (press Enter to skip any of them)"
 if [ "$TTY" = /dev/tty ]; then node scripts/setup.js < /dev/tty; else node scripts/setup.js --yes; fi
 mkdir -p data
 
-# 5. Self-check
+# 6. Self-check
 say "Running a quick self-check"
-npm test --silent >/dev/null 2>&1 && ok "All checks passed" || die "Self-check failed. Run 'npm test' to see why."
+node --test test/*.test.js >/dev/null 2>&1 && ok "All checks passed" || die "Self-check failed. Run 'npm test' to see why."
 
 PORT="$(grep -E '^PORT=' .env | cut -d= -f2)"; PORT="${PORT:-3000}"
 
-# 6. Run 24/7 as a service (Linux)
+# 7. Run 24/7 as a service (Linux)
 if [ "$SERVICE" = 1 ]; then
   has systemctl || die "--service needs a Linux server with systemd. Use --docker instead, or just run 'npm start'."
   say "Installing the 'salesboard' service so it runs 24/7 and restarts on reboot"
@@ -107,6 +112,6 @@ UNIT
   exit 0
 fi
 
-# 7. Start
+# 8. Start
 say "Starting SalesBoard → http://localhost:$PORT   (Ctrl+C to stop, 'npm start' to start again)"
 exec node server.js

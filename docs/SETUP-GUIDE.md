@@ -28,6 +28,8 @@ When one of your sales reps gets a "yes", they:
 | Creates a login so the owner can see their leads and texts | GoHighLevel |
 | Builds their AI receptionist and buys them a local phone number | Retell |
 | Emails them a welcome note + a 3-minute setup form | Brevo |
+| Texts them reminders until the setup form is done | GoHighLevel |
+| Pays the rep's commission to their card once the client pays | Stripe (instant pay) |
 
 When the client fills in the setup form, their hours, services and FAQs flow into their account and their AI receptionist automatically.
 
@@ -49,6 +51,7 @@ Open each website, click **Sign up**, and make an account with your business ema
 | ☐ | **stripe.com** | Collects the money | Free, small fee per payment |
 | ☐ | **gohighlevel.com** | Builds and runs every client's account | **Agency Pro** plan ($497/month, has a free trial) |
 | ☐ | **retellai.com** | AI receptionists | Pay as you go (about 10–30¢ per call minute) |
+| ☐ | **console.anthropic.com** *(optional)* | AI-written call openers | Pay as you go (well under 1¢ per opener) |
 
 > 💡 **Why the Agency Pro plan?** GoHighLevel only lets outside apps like SalesBoard create client accounts on its Agency Pro plan. That's what makes the one button work. The prices already cover it: about 4 live workflows pay for the plan.
 
@@ -130,6 +133,23 @@ You'll make **https://board.yourdomain.com** open SalesBoard. (Your domain must 
 
 ---
 
+## 🔒 Part 4b: Lock the door with Cloudflare Access (15 minutes, free)
+
+Right now anyone on the internet can reach your login screen. This adds a second lock: people must prove their email before they even see SalesBoard. Clients still open their own links without a login.
+
+1. **Cloudflare → Zero Trust → Access → Applications → Add an application → Self-hosted**.
+2. **Application name:** `SalesBoard`. **Domain:** subdomain `board`, domain `yourdomain.com`. **Session duration:** 1 month.
+3. **Add a policy:** name `Team`, action **Allow**, **Include → Emails** → type each teammate's email (or **Emails ending in** `@yourdomain.com`). Save.
+4. Login methods: leave **One-time PIN** on (they type their email, get a code, done).
+5. Now let clients, Stripe and Retell through. Create **one more Self-hosted application** named `SalesBoard public` with these paths (click **+ Add path** for each), all on `board.yourdomain.com`:
+   - `onboard` · `unsubscribe` · `api/onboard` · `api/unsubscribe` · `api/hooks`
+
+   Policy: name `Everyone`, action **Bypass**, **Include → Everyone**. Save.
+
+✅ **Check:** open `https://board.yourdomain.com` in a private window. Cloudflare asks for your email first. Then open any client setup link: it opens with no login.
+
+---
+
 ## 🔎 Part 5: Google leads (10 minutes)
 
 1. Go to **console.cloud.google.com** (same project as Part 3).
@@ -178,6 +198,20 @@ You'll make **https://board.yourdomain.com** open SalesBoard. (Your domain must 
 
 ✅ **Check:** the Launch checklist shows Stripe ✅. (You'll test a payment in Part 11.)
 
+## ⚡ Part 7b: Instant pay for your reps (10 minutes)
+
+This lets each rep get their commission on their debit card (a **Cash App Card** works if Stripe accepts it) within minutes of the client paying. It uses **Stripe Connect**.
+
+1. In **Stripe**, click **Connect** in the left menu → **Get started**. When asked how you'll use Connect, choose the option for **paying out to people/contractors** (Express accounts). Finish the short platform questions.
+2. Stripe's Connect fees: about **$2 per active rep per month + 0.25% + 25¢ per payout**, plus a small fee for *instant* payouts (Stripe shows the exact amount). Standard payouts (1–2 days) have no instant fee.
+3. **Each rep:** SalesBoard → **💰 My Money** → **⚡ Set up instant pay** → Stripe asks for their name, birthday, last 4 of their SSN (for tax forms) and their **debit card** → done. Their money page then says **✅ Ready**.
+
+How it works: when a client pays, the commission goes out automatically as soon as the money is available in your Stripe balance. Card payments usually take about 2 business days to clear. **Want it truly instant from day one?** In Stripe go to **Balances → Add to balance** and keep a small cushion (for example $500) so payouts don't wait for the client's money to clear.
+
+> 💚 **Rather use Cash App?** Reps can also save their **$cashtag** on the My Money page. In **Manager → 👥 Team & Payouts** you'll see a green **Pay on Cash App** button that opens Cash App with the amount filled in. Send it, then tap **Mark paid**. (Cash App doesn't let apps send money automatically, so this one is a tap.)
+
+> 🧾 **All sales are final:** your no-refund policy is shown right above the Pay button on every Stripe checkout, on the client's setup page, and reps are prompted to say it before pressing SET IT ALL UP. Change the wording in **Manager → ⚙️ Settings**.
+
 ---
 
 ## 🏢 Part 8: GoHighLevel, the engine that builds client accounts (1–2 hours, done once)
@@ -225,6 +259,25 @@ In **Agency view** → **Settings** → **Company** (or **Business Profile**), l
 
 ✅ **Check:** the Launch checklist shows Retell ✅.
 
+Retell will now report every AI receptionist call back to SalesBoard, so you can see minutes used per client. You'll get a warning when a client passes 80% of their included minutes.
+
+## ✨ Part 9b: AI-written openers (optional, 5 minutes)
+
+Reps get a **✨ Write my opener** button on the call screen. It reads the business's Google reviews and writes a personal first line.
+
+1. Go to **console.anthropic.com** → sign up → **Billing** (add a card; each opener costs well under a cent) → **API Keys** → **Create Key** → copy it (starts with `sk-ant-`).
+2. SSH window: `cd ~/sales-board && npm run setup`. Paste it at **Anthropic API key**, then `sudo systemctl restart salesboard`.
+
+## 💾 Part 9c: Off-server backups (10 minutes)
+
+SalesBoard already saves a backup on the server every night (the last 14 are kept). This copies each one somewhere safe too, in case the server ever breaks.
+
+1. **console.cloud.google.com** → search **Buckets** → **Create**: name it something unique like `salesboard-backups-yourname`, location **Region** → the same region as your server (e.g. `us-east1`), class **Standard** → **Create**. (5 GB is free in US regions.)
+2. Give your server permission to write there: **VM instances** → click `salesboard` → **Stop** → **Edit** → **Access scopes** → **Set access for each API** → **Storage: Read Write** → **Save** → **Start**.
+3. SSH window: `cd ~/sales-board && npm run setup`. Type the bucket name at **Google Cloud Storage bucket**, then `sudo systemctl restart salesboard`.
+
+✅ **Check:** **Manager → 🚀 Launch → 💾 Back up now** says "copied off-server ✅". You can also press **⬇️ Download a copy** in Settings any time.
+
 ---
 
 ## 🧪 Part 10: Make sure everything is green
@@ -241,6 +294,8 @@ If something isn't green:
 ## 🏁 Part 11: Add your team + do a practice close
 
 1. **Manager → 👥 Team & Payouts** → add each rep: their **first name** and a **4-digit PIN**. Tell each rep their PIN in person.
+   - Each rep, on their phone: open `https://board.yourdomain.com` → **Share** (iPhone) or **⋮** (Android) → **Add to Home Screen**. Open SalesBoard from the new icon and tap **🔔 Turn on** so they get a buzz when a callback is due and when they get paid.
+   - Each rep: **💰 My Money** → set up **⚡ instant pay** (Part 7b) and/or save their **$cashtag**.
 2. Do a practice close **using yourself as the client**:
    - **🔎 Find Leads** → **➕ Add a lead by hand** → use a made-up business name and **your own cell number**.
    - Press **🎉 THEY SAID YES!** → tick **24/7 AI Receptionist** + one more → type **your own name, email and cell** → **🚀 SET IT ALL UP**.
@@ -273,4 +328,6 @@ If something isn't green:
 | Emails say "queued" | Manager → 📧 Email Drip tells you exactly what's missing |
 | Website won't open | In the SSH window: `sudo systemctl restart salesboard`. Check the tunnel says **Healthy** in Cloudflare. |
 | Want a backup | Copy `~/sales-board/data/db.json` somewhere safe every week |
-| Update SalesBoard later | SSH window: `cd ~/sales-board && git pull && sudo systemctl restart salesboard` |
+| Update SalesBoard later | SSH window: `cd ~/sales-board && git pull && npm ci --omit=dev && sudo systemctl restart salesboard` |
+| A rep's commission says "waiting" | The client's card payment is still clearing in Stripe (about 2 business days). It sends by itself. Keep a balance cushion (Part 7b) to skip the wait. |
+| Rep isn't getting notifications | On iPhone it only works from the Home Screen icon. Have them tap 🔔 Turn on again. |

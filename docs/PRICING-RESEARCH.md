@@ -58,3 +58,10 @@ These are estimates from public pricing pages and industry write-ups. Real price
 **AI upgrade:** workflows marked "No AI needed (AI add-on)" can add the AI upgrade for **+$47/mo** (our cost about $12/mo). It's monthly only, so it doesn't change the rep's setup commission.
 
 **AI Receptionist:** the price includes up to 600 call minutes a month. Heavy users (500+ calls/month) should go on a higher tier so voice minutes don't eat the margin.
+
+**Yearly prepay:** clients can pay for a year up front at 10× the monthly price (2 months free). Every workflow still makes a profit on yearly billing because monthly margins are 52–84%. Commission is unchanged: 10% of the setup fee, once.
+
+**Paying reps instantly:** Stripe Connect costs about $2 per active rep per month + 0.25% + 25¢ per payout, plus Stripe's instant-payout fee. On a typical $44.70 commission that's under $2. Cash App payouts are free but take a manual tap.
+
+**No refunds:** your policy ("All sales are final. No refunds.") is shown right above the Pay button on every Stripe checkout and on the client's setup page. That's why commission can be paid out right away (the hold is 0 days by default). Card disputes (chargebacks) can still happen, so if you see any, set a short hold in Manager → Settings.
+

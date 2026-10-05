@@ -86,6 +86,7 @@ Create each of these. **Type the names exactly like this**, all lowercase with u
 | **SB · Invoice Chaser** | **Invoice** sent / due | **Wait** 3 days → if unpaid: SMS reminder → **Wait** 4 days → SMS → **Wait** 7 days → Email |
 | **SB · Estimate Follow-Up** | **Opportunity stage changed** → "Estimate sent" (or tag `estimate-sent`) | **Wait** 1 day → SMS → **Wait** 2 days → Email → **Wait** 4 days → SMS → **Wait** 7 days → Email. Add a **Goal: Contact replied** so it stops when they answer. |
 | **SB · Referral & Rebooking** | **Opportunity status changed → Won** | **Wait** 3 days → SMS: *"Give your friends {{custom_values.sb_referral_reward}} off, and get it yourself too!"* → **Wait** (their rebook time, e.g. 180 days) → SMS: *"Time for your next visit! Book here: …"* |
+| **SB · Setup form reminder** | **Contact tag added** = `sb-setup-pending` (SalesBoard adds the owner with this tag) | **Wait** 1 day → **If/Else** contact still has tag `sb-setup-pending` → **Send SMS** to the contact: *"Hi {{contact.first_name}}! Quick reminder to fill in your 3-minute setup form so we can finish everything: {{custom_values.sb_onboarding_link}}"* → **Wait** 2 days → same check → SMS again. *(No on/off switch needed: SalesBoard removes the tag when the form is done.)* |
 | **SB · AI Upgrade** (optional) | Same triggers as above | Add a second If/Else on `sb_ai_…` = `on` → turn on **Conversation AI** for the reply |
 
 **📣 Social Autopilot** doesn't need a workflow. Your team sets it up in **Marketing → Social Planner** (it's on their checklist).

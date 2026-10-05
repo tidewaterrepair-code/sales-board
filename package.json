@@ -12,7 +12,10 @@
     "install-all": "bash install.sh"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.5"
   },
-  "license": "UNLICENSED"
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0"
+  }
 }

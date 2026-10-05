@@ -62,6 +62,8 @@ function buildDeal({ lead, rep, workflows, contact, notes, commissionRate, optio
       status: 'queued',
       tasks: w.setupTasks.map((t) => ({ label: t.label, by: t.by, done: false })),
     })),
+    billing: options.billing === 'yearly' ? 'yearly' : 'monthly',
+    yearlyTotal: monthlyTotal * 10, // pay yearly = 2 months free
     options: {
       areaCode: /^\d{3}$/.test(areaCode) ? areaCode : '',
       createLogin: options.createLogin !== false,
@@ -90,7 +92,7 @@ function buildDeal({ lead, rep, workflows, contact, notes, commissionRate, optio
   };
 }
 
-async function createStripeCheckout({ deal, secretKey, publicUrl, fetchImpl = fetch }) {
+async function createStripeCheckout({ deal, secretKey, publicUrl, policy, fetchImpl = fetch }) {
   const p = new URLSearchParams();
   const recurring = deal.monthlyTotal > 0;
   p.set('mode', recurring ? 'subscription' : 'payment');
@@ -100,6 +102,8 @@ async function createStripeCheckout({ deal, secretKey, publicUrl, fetchImpl = fe
   if (deal.contact.email) p.set('customer_email', deal.contact.email);
   const onboard = `${publicUrl}/onboard/${deal.onboardingToken}`;
   p.set('success_url', `${onboard}?paid=1`);
+  // Shown right above the Pay button so the policy is clear before they buy.
+  if (policy) p.set('custom_text[submit][message]', policy.slice(0, 1000));
   p.set('cancel_url', onboard);
   let i = 0;
   const names = deal.workflows.map((w) => w.name).join(', ');
@@ -111,9 +115,10 @@ async function createStripeCheckout({ deal, secretKey, publicUrl, fetchImpl = fe
     i++;
     p.set(`line_items[${i}][quantity]`, '1');
     p.set(`line_items[${i}][price_data][currency]`, 'usd');
-    p.set(`line_items[${i}][price_data][unit_amount]`, String(Math.round(deal.monthlyTotal * 100)));
-    p.set(`line_items[${i}][price_data][recurring][interval]`, 'month');
-    p.set(`line_items[${i}][price_data][product_data][name]`, `Monthly service: ${names}`.slice(0, 250));
+    const yearly = deal.billing === 'yearly';
+    p.set(`line_items[${i}][price_data][unit_amount]`, String(Math.round((yearly ? deal.yearlyTotal : deal.monthlyTotal) * 100)));
+    p.set(`line_items[${i}][price_data][recurring][interval]`, yearly ? 'year' : 'month');
+    p.set(`line_items[${i}][price_data][product_data][name]`, `${yearly ? 'Yearly service (2 months free)' : 'Monthly service'}: ${names}`.slice(0, 250));
   }
   const res = await fetchImpl('https://api.stripe.com/v1/checkout/sessions', {
     method: 'POST',
