@@ -55,4 +55,43 @@ async function writeOpener(c, { business, trade, city, rating, reviewCount, webs
   }
 }
 
-module.exports = { MODEL, client, writeOpener, available: () => Boolean(Anthropic) };
+const VARIANT_SYSTEM = `You improve cold-call scripts for a sales team calling local businesses. You write ONE new version of a script section to A/B test against the current best version.
+Rules:
+- Keep it short and natural to say out loud (the opener is 2-3 sentences; a pitch or close is 3-5 sentences).
+- Try a genuinely different angle from the existing versions (question-led, story, social proof, cost of doing nothing, etc.), not a light reword.
+- Only use these fill-in fields, exactly as written, where useful: {{business}} {{rep}} {{city}} {{trade}} {{customer}} {{setup}} {{monthly}} {{marketSetup}} {{marketMonthly}}.
+- No made-up statistics, guarantees, or claims about results. No emojis.
+- A close must end by asking for the sale, and must mention the price with {{setup}} and {{monthly}}.
+- Output only the script text.`;
+
+async function writeVariant(c, { kind, goal, workflow, versions }) {
+  const body = [
+    `Script section: ${kind}${workflow ? ` for the service "${workflow.name}" (${workflow.tagline})` : ''}.`,
+    `A "win" for this section means the call ${goal}.`,
+    'Existing versions and their results so far:',
+    ...versions.map((v) => `- ${v.label}: ${v.wins}/${v.shown} wins (${v.shown ? Math.round((v.wins / v.shown) * 100) : 0}%)${v.status === 'winner' ? ' [current best]' : ''}\n  "${v.text}"`),
+    'Write one new challenger version.',
+  ].join('\n');
+  try {
+    const response = await c.beta.messages.create({
+      model: MODEL,
+      max_tokens: 2048,
+      output_config: { effort: 'medium' },
+      betas: ['server-side-fallback-2026-07-01'],
+      fallbacks: 'default',
+      system: VARIANT_SYSTEM,
+      messages: [{ role: 'user', content: body }],
+    });
+    if (response.stop_reason === 'refusal') throw new Error('The AI could not write a new version this time.');
+    const text = response.content.filter((b) => b.type === 'text').map((b) => b.text).join(' ').trim();
+    if (!text) throw new Error('The AI returned nothing. Try again.');
+    return text;
+  } catch (err) {
+    if (Anthropic && err instanceof Anthropic.AuthenticationError) throw new Error('The ANTHROPIC_API_KEY is not valid.');
+    if (Anthropic && err instanceof Anthropic.RateLimitError) throw new Error('The AI is busy right now. Try again in a minute.');
+    if (Anthropic && err instanceof Anthropic.APIError) throw new Error(`AI error (${err.status}). Try again.`);
+    throw err;
+  }
+}
+
+module.exports = { MODEL, client, writeOpener, writeVariant, available: () => Boolean(Anthropic) };

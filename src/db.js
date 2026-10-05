@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const ARRAYS = ['users', 'sessions', 'leads', 'deals', 'events', 'drips'];
+const ARRAYS = ['users', 'sessions', 'leads', 'deals', 'events', 'drips', 'variants'];
 const OBJECTS = ['settings', 'workflowOverrides', 'usage', 'suppressed', 'dnc', 'system'];
 const keyOf = (col, rec) => (col === 'sessions' ? rec.hash : rec.id);
 
@@ -23,6 +23,7 @@ const EMPTY = () => ({
   deals: [],
   events: [],
   drips: [],
+  variants: [],
   settings: {},
   workflowOverrides: {},
   usage: {},

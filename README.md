@@ -13,6 +13,8 @@ A fun, competitive sales dashboard built so anyone can use it. Your team uses it
 - ✨ **AI openers** *(optional)*: Claude writes a personal first line for each call from the business's Google reviews.
 - 🔔 **Phone notifications**: installable app with a buzz when a callback is due or a commission is paid.
 - 📈 **Insights**: close rate by business type and lead signal, best hours to call, the bundles that sell.
+- 🧠 **Self-learning**: script A/B tests that run themselves. Thompson sampling sends more calls to better versions, winners are promoted automatically at 95% confidence, and the AI writes new challengers so testing never stops. Lead scores and workflow recommendations also adjust to what actually closes.
+- 👑 **Owner + admin controls**: the founding account is a protected owner. Managers add/edit/delete reps; the owner manages managers and can hand over ownership; every change is in the admin log; `npm run admin` recovers access from the server.
 - 🛡️ **Built to keep running**: interrupted setups resume after a restart, temporary vendor errors are retried, duplicate client accounts are prevented, nightly backups (optionally off-server), SQLite storage, a do-not-call list, and Google data handled per Google's terms (only place IDs are saved).
 
 Needs Node.js 22.5+ (the installer gets it for you). One package: the Anthropic SDK, used only for AI openers.
@@ -138,8 +140,9 @@ It's a single Node process that stores everything in `data/salesboard.db` (SQLit
 
 - **🚀 Launch**: the setup checklist with live status and a **Test connection** button for every tool.
 - **Deals**: every deal with its one-button setup steps (Retry if a step failed), the client's onboarding answers, AI-receptionist minutes and the fulfillment checklist. Mark the client paid, pay the rep now, mark workflows live, cancel.
-- **Team & Payouts**: add reps, reset PINs, deactivate people. See commission owed per rep, pay on Cash App in one tap, and record payouts.
+- **Team & Payouts**: add, edit, deactivate or delete team members (owner-only for managers), see commission owed per rep, pay on Cash App in one tap, record payouts, and review the admin activity log.
 - **Pricing & Profit**: market vs. our price vs. cost, with profit guarded.
+- **🧪 A/B Tests**: every running script test with win rates, the chance each version is best, make-winner/pause buttons, "AI: write a new challenger", and the learning log.
 - **📧 Email Drip** and **📈 Insights**.
 - **Settings**: company name, commission %, refund policy, auto-payouts + hold days, AI minutes included, goals, default city, contest, webhook URL, backups (run now / download).
 
@@ -149,6 +152,7 @@ It's a single Node process that stores everything in `data/salesboard.db` (SQLit
 
 ```bash
 npm run setup # change keys (.env)
+npm run admin # emergency admin: list, reset-pin, make-owner, add-manager, delete
 npm run dev   # auto-restart on changes
 npm test      # node:test suite (CI runs it on every push)
 ```
@@ -167,6 +171,9 @@ src/push.js        Web Push notifications (VAPID + RFC 8291 encryption, no packa
 src/backup.js      nightly backups (+ Google Cloud Storage upload)
 src/ai.js          AI-written openers (Anthropic SDK)
 src/db.js          SQLite storage (writes only changed records), JSON fallback
+src/experiments.js self-running script A/B tests (Thompson sampling, auto-promotion)
+src/learn.js       learned lead scoring + per-industry workflow recommendations
+scripts/admin.js   emergency admin CLI
 scripts/setup.js   interactive .env wizard (used by install.sh)
 src/game.js        points, levels, badges, leaderboard
 src/auth.js        PIN login + sessions

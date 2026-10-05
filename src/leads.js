@@ -9,6 +9,7 @@
 const crypto = require('node:crypto');
 const { getIndustry } = require('./industries');
 const { WORKFLOWS } = require('./workflows');
+const learn = require('./learn');
 
 const PLACES_URL = 'https://places.googleapis.com/v1/places:searchText';
 const FIELD_MASK = [
@@ -90,7 +91,7 @@ async function getPlaceDetails({ apiKey, placeId, industryKey, city, withReviews
 // no Google-provided numbers or text (Google's terms allow storing place IDs).
 const GENERIC_SIGNAL = { no_website: 'No website', few_reviews: 'Few reviews', low_rating: 'Low rating', no_rating: 'No rating yet', busy: 'Busy & loved', no_phone: 'No phone listed', closed: 'Not operating' };
 function storableAnalysis(a) {
-  return { ...a, signals: a.signals.map((sig) => ({ ...sig, label: GENERIC_SIGNAL[sig.key] || sig.key })) };
+  return { ...a, signals: a.signals.map((sig) => ({ ...sig, label: GENERIC_SIGNAL[sig.key] || sig.key })), learned: undefined };
 }
 
 // ---------- Demo data ----------
@@ -163,7 +164,8 @@ function demoLeads({ industryKey, city, page = 0 }) {
 
 // ---------- Scoring & recommendations ----------
 
-function analyzeLead(lead) {
+// model = what the system has learned from real results (see learn.js).
+function analyzeLead(lead, model) {
   const signals = [];
   let score = 20;
   const hasPhone = Boolean(lead.phone);
@@ -194,7 +196,9 @@ function analyzeLead(lead) {
   }).sort((a, b) => b.fit - a.fit);
 
   const temperature = score >= 70 ? 'hot' : score >= 45 ? 'warm' : 'cold';
-  return { score, temperature, signals, recommended: ranked.slice(0, 3).map((r) => r.id), hook: hookFor(keys) };
+  const base = { score, temperature, signals, recommended: ranked.slice(0, 3).map((r) => r.id), hook: hookFor(keys), ranked };
+  const { ranked: _drop, ...out } = learn.apply(base, lead, model);
+  return out;
 }
 
 function hookFor(keys) {

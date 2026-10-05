@@ -493,6 +493,11 @@
       ${S.search.next ? `<div class="center" style="margin-top:1rem"><button class="btn lg" data-act="more-leads" ${S.search.loading ? 'disabled' : ''}>⬇️ Load more</button></div>` : ''}`;
   }
 
+  const learnedTag = (a) => {
+    const pts = (a?.learned || []).reduce((s2, x) => s2 + x.pts, 0);
+    return pts ? `<span class="tag ${pts > 0 ? 'good' : 'cold'}" title="${esc(a.learned.map((x) => `${x.label}: ${x.pts > 0 ? '+' : ''}${x.pts}`).join(', '))}">🧠 ${pts > 0 ? '+' : ''}${pts} learned</span>` : '';
+  };
+
   function leadCard(l, i) {
     const a = l.analysis;
     const recs = a.recommended.map(wfById).filter(Boolean);
@@ -509,7 +514,7 @@
           <div class="name">${esc(l.name)}</div>
           <div class="small muted ellipsis">${esc(l.category)} · ${esc(l.address)}</div>
           <div class="small">${l.rating != null ? `⭐ ${l.rating}` : '⭐ —'} · ${plural(l.reviews, 'review')}${l.phone ? ` · 📞 ${esc(l.phone)}` : ''}</div>
-          <div class="chips" style="margin:.5rem 0;gap:.3rem">${a.signals.map((s) => `<span class="tag ${s.tone}">${s.icon} ${esc(s.label)}</span>`).join('')}</div>
+          <div class="chips" style="margin:.5rem 0;gap:.3rem">${a.signals.map((s) => `<span class="tag ${s.tone}">${s.icon} ${esc(s.label)}</span>`).join('')}${learnedTag(a)}</div>
           <div class="small"><b>Pitch:</b> ${recs.map((w) => `${w.emoji} ${esc(w.name)}`).join(' · ')}</div>
         </div>
       </div>
@@ -599,13 +604,14 @@
   const STEPS = ['👋 Open', '🎣 Hook', '❓ Ask', '💡 Pitch', '🤝 Close'];
 
   async function viewCall(view, leadId) {
-    const { lead, deals, drip } = await api('GET', `/api/leads/${encodeURIComponent(leadId)}`);
+    const { lead, deals, drip, scripts } = await api('GET', `/api/leads/${encodeURIComponent(leadId)}`);
     if (S.call.leadId !== lead.id) {
       const rec = (lead.analysis?.recommended || []).filter((id) => wfById(id));
       S.call = { leadId: lead.id, lead, step: 0, selected: rec.slice(0, 1), showAll: false, obj: null, roi: {} };
     }
     S.call.lead = lead;
     S.call.deals = deals;
+    S.call.scripts = scripts || {};
     S.call.drip = drip;
     drawCall(view);
   }
@@ -626,7 +632,7 @@
                 <h2 style="margin:0">${esc(lead.name)}</h2>
                 <div class="small muted">${esc(industry(lead.industry).emoji)} ${esc(lead.category)} · ${esc(lead.address || lead.city)}</div>
                 <div class="small">${lead.rating != null ? `⭐ ${lead.rating}` : '⭐ —'} · ${plural(lead.reviews, 'review')} · ${lead.website ? `<a href="${esc(lead.website)}" target="_blank" rel="noopener">website</a>` : '<b style="color:var(--hot)">no website</b>'}${lead.mapsUrl ? ` · <a href="${esc(lead.mapsUrl)}" target="_blank" rel="noopener">Google</a>` : ''}</div>
-                <div class="chips" style="margin-top:.4rem;gap:.3rem"><span class="tag">${STATUS_LABEL[lead.status] || esc(lead.status)}</span>${a.signals.map((s) => `<span class="tag ${s.tone}">${s.icon} ${esc(s.label)}</span>`).join('')}</div>
+                <div class="chips" style="margin-top:.4rem;gap:.3rem"><span class="tag">${STATUS_LABEL[lead.status] || esc(lead.status)}</span>${a.signals.map((s) => `<span class="tag ${s.tone}">${s.icon} ${esc(s.label)}</span>`).join('')}${learnedTag(a)}</div>
               </div>
             </div>
             ${lead.phone ? `<a class="btn go xl" style="margin-top:.9rem" href="${telHref(lead.phone)}">📞 Tap to call ${esc(lead.phone)}</a>` : '<p class="muted">No phone number on file.</p>'}
@@ -674,22 +680,27 @@
   function prompterHtml(lead, wfs, step) {
     const ctx = ctxFor(lead, wfs);
     const w = wfs[0];
-    const say = '<span class="say">🗣️ Say this</span>';
+    // Script versions come from the self-learning A/B tests (server picks per lead).
+    const sc = S.call.scripts || {};
+    const pick = (slot, fallback) => sc[slot]?.text || fallback;
+    const tagFor = (slot) => (sc[slot]?.testing ? ` <span class="ab-tag" title="This line is being A/B tested. Read it as written.">🧪 ${esc(sc[slot].label.replace(/ \(.*\)/, ''))}</span>` : '');
+    const sayFor = (slot) => `<span class="say">🗣️ Say this${slot ? tagFor(slot) : ''}</span>`;
+    const say = sayFor(null);
     if (!w && step >= 2) return `${say}Pick at least one workflow on the right →`;
-    if (step === 0) return `${say}${fill(S.catalog.opener, ctx)}<div class="coach">😊 Smile while you talk. They can hear it. Wait for a "yeah, what's up?"</div>`;
+    if (step === 0) return `${sayFor('opener')}${fill(pick('opener', S.catalog.opener), ctx)}<div class="coach">😊 Smile while you talk. They can hear it. Wait for a "yeah, what's up?"</div>`;
     if (step === 1) return `${say}${fill(lead.analysis?.hook || '', ctx)} That's actually why I'm calling.<div class="coach">⏸️ Pause here and let them respond. If they say they're busy → tap <b>"I'm busy right now"</b> under Objections.</div>`;
     if (step === 2) return `${say}<ul>${w.discovery.map((q) => `<li>${fill(q, ctx)}</li>`).join('')}</ul><div class="coach">👂 Ask one question, then <b>stop talking and listen</b>. Jot their answers in Notes. Plug their numbers into the calculator →</div>`;
     if (step === 3) {
       const extra = wfs.slice(1).map((x) => `<li><b>${x.emoji} ${esc(x.name)}:</b> ${fill(x.tagline, ctx)}</li>`).join('');
       const roi = roiValue(w, lead, S.call.roi);
-      return `${say}${fill(w.pitch, ctx)}${extra ? `<p style="margin-top:.8rem">And on top of that, I'd add:</p><ul>${extra}</ul>` : ''}
+      return `${sayFor(`pitch:${w.id}`)}${fill(pick(`pitch:${w.id}`, w.pitch), ctx)}${extra ? `<p style="margin-top:.8rem">And on top of that, I'd add:</p><ul>${extra}</ul>` : ''}
         <div class="coach">💡 Drop the number: <i>"For a business like yours that's about <b>${esc(roi)}</b>: ${esc(w.roi.label.toLowerCase())}."</i></div>`;
     }
     const names = wfs.map((x) => x.name).join(' + ');
     const closeLine = wfs.length > 1
       ? `So here's what I'd recommend for {{business}}: ${names}. It's {{setup}} one time to set it all up and {{monthly}} a month. I can get it started today. Want me to set it up for you?`
-      : w.close;
-    return `${say}${fill(closeLine, ctx)}
+      : pick(`close:${w.id}`, w.close);
+    return `${wfs.length > 1 ? say : sayFor(`close:${w.id}`)}${fill(closeLine, ctx)}
       <div class="coach">🤐 Ask, then <b>STOP talking</b>. Whoever talks first loses. If they say YES → hit the big gold button. Objection? Use the list on the right.</div>`;
   }
 
@@ -799,7 +810,7 @@
     const { lead } = S.call;
     try {
       const before = S.stats;
-      const r = await api('POST', `/api/leads/${lead.id}/outcome`, { outcome, ...extra });
+      const r = await api('POST', `/api/leads/${lead.id}/outcome`, { outcome, pitched: S.call.selected, ...extra });
       S.call.lead = r.lead; S.stats = r.stats;
       celebrateChanges(before, r.stats);
       updateChrome('call');
@@ -1170,6 +1181,8 @@
     S.admin.data = d;
     S.admin.drips = S.admin.tab === 'drip' ? await api('GET', '/api/admin/drips') : null;
     S.admin.insights = S.admin.tab === 'insights' ? await api('GET', '/api/admin/insights') : null;
+    S.admin.experiments = S.admin.tab === 'experiments' ? await api('GET', '/api/admin/experiments') : null;
+    S.admin.audit = S.admin.tab === 'team' ? (await api('GET', '/api/admin/audit')).entries : null;
     const t = S.admin.tab;
     view.innerHTML = `
       <div class="stack">
@@ -1180,9 +1193,9 @@
           <div class="card"><div class="label">Commission owed now</div><div class="stat gold">${money(d.totals.commissionOwed)}</div><div class="tiny muted">+ ${money(d.totals.commissionPending)} pending payment</div></div>
           <div class="card"><div class="label">Deals</div><div class="stat">${d.totals.deals}</div></div>
         </div>
-        <div class="tabs">${[['launch', '🚀 Launch'], ['deals', '📑 Deals'], ['team', '👥 Team & Payouts'], ['pricing', '🏷️ Pricing & Profit'], ['drip', '📧 Email Drip'], ['insights', '📈 Insights'], ['settings', '⚙️ Settings']].map(([k, l]) => `<button class="tab ${t === k ? 'on' : ''}" data-act="admin-tab" data-k="${k}">${l}</button>`).join('')}</div>
+        <div class="tabs">${[['launch', '🚀 Launch'], ['deals', '📑 Deals'], ['team', '👥 Team & Payouts'], ['pricing', '🏷️ Pricing & Profit'], ['drip', '📧 Email Drip'], ['experiments', '🧪 A/B Tests'], ['insights', '📈 Insights'], ['settings', '⚙️ Settings']].map(([k, l]) => `<button class="tab ${t === k ? 'on' : ''}" data-act="admin-tab" data-k="${k}">${l}</button>`).join('')}</div>
         ${(d.alerts || []).length ? `<div class="card" style="border-color:var(--warm)">⚠️ <b>AI receptionist minutes:</b> ${d.alerts.map((a) => `${esc(a.business)} used ${a.minutes} of ${a.included} min`).join(' · ')}. Offer them a bigger plan before you pay for extra minutes.</div>` : ''}
-        <div>${t === 'launch' ? adminLaunch(d) : t === 'deals' ? adminDeals(d) : t === 'team' ? adminTeam(d) : t === 'pricing' ? adminPricing(d) : t === 'drip' ? adminDrip(S.admin.drips) : t === 'insights' ? adminInsights(S.admin.insights) : adminSettings(d)}</div>
+        <div>${t === 'launch' ? adminLaunch(d) : t === 'deals' ? adminDeals(d) : t === 'team' ? adminTeam(d) : t === 'pricing' ? adminPricing(d) : t === 'drip' ? adminDrip(S.admin.drips) : t === 'insights' ? adminInsights(S.admin.insights) : t === 'experiments' ? adminExperiments(S.admin.experiments, d) : adminSettings(d)}</div>
       </div>`;
   }
 
@@ -1219,11 +1232,66 @@
     </div>`;
   }
 
+  function adminExperiments(x, d) {
+    if (!x) return '<p class="muted">Loading…</p>';
+    const st = { active: '🧪 Testing', winner: '🏆 Winner', paused: '⏸️ Paused', retired: '🗄️ Retired' };
+    const origin = { 'built-in': 'original', seed: 'starter idea', manager: 'written by you', ai: '✨ written by AI' };
+    const s = d.settings;
+    return `<div class="stack">
+      <div class="card">
+        <h3>🧪 Self-learning scripts</h3>
+        <p class="small">Every lead gets one version of each script part being tested. Versions that win more calls automatically get used more. Once one is clearly better (${Math.round(x.settings.confidence * 100)}% sure, after ${x.settings.minTrials}+ calls each), it becomes everyone's script${s.abAiChallengers !== false && x.aiReady ? ', and the AI writes a new challenger to try to beat it' : ''}. Reps just read what's on screen.</p>
+        <form class="row" data-form="ab-settings" style="margin-top:.4rem">
+          <label class="check ${s.abAutoPromote !== false ? 'on' : ''}"><input type="checkbox" name="abAutoPromote" ${s.abAutoPromote !== false ? 'checked' : ''}><span>Auto-pick winners</span></label>
+          <label class="check ${s.abAiChallengers !== false ? 'on' : ''}"><input type="checkbox" name="abAiChallengers" ${s.abAiChallengers !== false ? 'checked' : ''} ${x.aiReady ? '' : 'disabled'}><span>AI writes new challengers${x.aiReady ? '' : ' (add ANTHROPIC_API_KEY)'}</span></label>
+          <label class="small">Min calls <input class="input" style="width:80px" type="number" name="abMinTrials" min="10" value="${s.abMinTrials || 30}"></label>
+          <label class="small">Sure % <input class="input" style="width:80px" type="number" name="abConfidence" min="80" max="99" value="${s.abConfidence || 95}"></label>
+          <button class="btn sm go">Save</button>
+        </form>
+      </div>
+      ${x.tests.map((t) => `<div class="card">
+        <div class="row between"><h3>${esc(t.label)}</h3><span class="small muted">${t.totalCalls} calls · win = ${esc(t.goal)}</span></div>
+        <div class="stack" style="margin-top:.5rem">${t.variants.filter((v) => v.status !== 'deleted').map((v) => `
+          <div class="ab-row ${v.status}">
+            <div class="row between" style="gap:.4rem"><div><b>${esc(v.label)}</b> <span class="tag">${st[v.status] || v.status}</span> <span class="tiny muted">${origin[v.origin] || ''}</span></div>
+              <div class="small"><b>${v.rate}%</b> win rate · ${v.wins}/${v.shown} calls${v.chanceBest != null ? ` · <b>${v.chanceBest}%</b> chance it's best` : ''}</div></div>
+            ${v.chanceBest != null ? `<div class="bar" style="height:8px;margin:.35rem 0"><i style="width:${v.chanceBest}%"></i></div>` : ''}
+            <div class="small" style="margin:.3rem 0">"${esc(v.text)}"</div>
+            <div class="row" style="gap:.3rem">
+              ${v.status !== 'winner' && v.status !== 'retired' ? `<button class="btn sm" data-act="ab-status" data-id="${v.id}" data-s="winner">🏆 Make winner</button>` : ''}
+              ${v.status === 'active' ? `<button class="btn sm" data-act="ab-status" data-id="${v.id}" data-s="paused">⏸️ Pause</button>` : ''}
+              ${v.status === 'paused' || v.status === 'retired' ? `<button class="btn sm" data-act="ab-status" data-id="${v.id}" data-s="active">▶ Test again</button>` : ''}
+              ${v.origin !== 'built-in' ? `<button class="btn sm danger" data-act="ab-delete" data-id="${v.id}">🗑️</button>` : ''}
+            </div>
+          </div>`).join('')}</div>
+        <div class="row" style="margin-top:.6rem">${x.aiReady ? `<button class="btn sm primary" data-act="ab-ai" data-slot="${t.slot}">✨ AI: write a new challenger</button>` : ''}<button class="btn sm" data-act="ab-add" data-slot="${t.slot}">✍️ Add my own version</button></div>
+      </div>`).join('')}
+      <div class="card">
+        <h3>➕ Start a new test</h3>
+        <form class="stack" data-form="ab-new">
+          <select class="input" name="slot">${x.slots.map((sl) => `<option value="${sl.slot}" ${S.admin.abSlot === sl.slot ? 'selected' : ''}>${esc(sl.label)}${sl.tested ? ' (testing)' : ''}</option>`).join('')}</select>
+          <textarea class="input" name="text" placeholder="Write your version. Fill-ins you can use: ${x.placeholders.map((p) => `{{${p}}}`).join(' ')}"></textarea>
+          <div class="row"><button class="btn go">Start testing it</button>${x.aiReady ? '<button type="button" class="btn primary" data-act="ab-ai-new">✨ Let the AI write one</button>' : ''}</div>
+          <p class="tiny muted">Your current script is automatically "Version A", so you're always comparing against what you have today.</p>
+        </form>
+      </div>
+      <div class="card"><h3>📜 Learning log</h3>
+        ${x.log.length ? x.log.map((e) => `<div class="small" style="margin:.3rem 0"><span class="muted">${new Date(e.at).toLocaleString()}</span> ${esc(e.text)}</div>`).join('') : '<p class="muted small">Nothing yet. Winners and new challengers show up here.</p>'}
+      </div>
+    </div>`;
+  }
+
   function adminInsights(x) {
     if (!x) return '<p class="muted">Loading…</p>';
     const hourLabel = (h) => new Date(2000, 0, 1, h).toLocaleTimeString([], { hour: 'numeric' });
     const maxCalls = Math.max(1, ...x.hours.map((h) => h.calls));
+    const L = x.learned;
     return `<div class="stack">
+      <div class="card"><h3>🧠 What the system learned</h3>
+        ${L.notes.length ? `<p class="small muted">Lead scores and "pitch this" picks now adjust for these, automatically:</p>${L.notes.map((n) => `<div class="small" style="margin:.3rem 0">${n.pts ? `<span class="tag ${n.pts > 0 ? 'good' : 'cold'}">${n.pts > 0 ? '+' : ''}${n.pts} pts</span>` : '<span class="tag">🎯 pick</span>'} ${esc(n.text)}</div>`).join('')}`
+          : `<p class="small muted">Still learning: ${L.calledLeads} leads called and ${L.deals} deals so far. It starts adjusting scores once a signal or business type has ${L.minLeads}+ called leads, and workflow picks once a business type has ${L.minDeals}+ deals.</p>`}
+        ${x.log.length ? `<details style="margin-top:.5rem"><summary class="small">📜 Recent script test results</summary>${x.log.slice(0, 8).map((e) => `<div class="small" style="margin:.3rem 0">${esc(e.text)}</div>`).join('')}</details>` : ''}
+      </div>
       <div class="card"><h3>⏰ Best times to call</h3>
         ${x.bestHours.length ? `<p>${x.bestHours.map((h) => `<b>${hourLabel(h.hour)}</b> (${h.rate}% say yes to a callback or more)`).join(' · ')}</p>` : '<p class="muted">Needs at least 10 calls in an hour to compare. Keep dialing!</p>'}
         <div class="hours">${x.hours.filter((h) => h.hour >= 7 && h.hour <= 20).map((h) => `<div class="hour" title="${hourLabel(h.hour)}: ${h.calls} calls"><i style="height:${Math.round((h.calls / maxCalls) * 100)}%;${h.calls >= 10 && x.bestHours.some((b) => b.hour === h.hour) ? 'background:var(--gold)' : ''}"></i><span>${hourLabel(h.hour).replace(/\s?[AP]M/i, '')}</span></div>`).join('')}</div>
@@ -1298,32 +1366,67 @@
   }
 
   function adminTeam(d) {
-    return `<div class="grid two">
-      <div class="card">
-        <h3>➕ Add a sales rep</h3>
-        <form class="stack" data-form="add-user">
-          <div class="field"><label>Name</label><input class="input" name="name" placeholder="First name" required></div>
-          <div class="field"><label>PIN they'll log in with (4–8 digits)</label><input class="input" name="pin" inputmode="numeric" pattern="\\d{4,8}" required></div>
-          <div class="field"><label>Role</label><select class="input" name="role"><option value="rep">Sales rep</option><option value="manager">Manager</option></select></div>
-          <button class="btn go block">Add to team</button>
-        </form>
+    const me = d.users.find((u) => u.id === S.user.id) || S.user;
+    const isOwner = Boolean(me.owner);
+    const audit = S.admin.audit || [];
+    return `<div class="stack">
+      <div class="card" style="border-color:${isOwner ? 'var(--gold)' : 'var(--line)'}">
+        ${isOwner ? '👑 <b>You\'re the owner.</b> Full admin: you can add, edit and delete anyone, make managers, and hand ownership to someone else. Nobody can remove or lock you out.' : '🛠️ <b>You\'re a manager.</b> You can add, edit and delete sales reps. Only the owner can change managers.'}
+        <div class="tiny muted" style="margin-top:.3rem">Locked out or forgot a PIN? On the server run <code>npm run admin</code> (see the guide's quick fixes).</div>
       </div>
-      <div class="card table-wrap">
-        <h3>👥 Team</h3>
-        <table class="tbl"><thead><tr><th>Rep</th><th class="num">Owed</th><th></th></tr></thead><tbody>
-        ${d.users.map((u) => `<tr style="${u.active ? '' : 'opacity:.5'}">
-          <td><div class="row" style="flex-wrap:nowrap;gap:.5rem"><span class="avatar" style="--c:${esc(u.color)};width:34px;height:34px;font-size:1.1rem">${esc(u.avatar)}</span><div><b>${esc(u.name)}</b><div class="tiny muted">${u.role}${u.demo ? ' · demo' : ''}${u.active ? '' : ' · inactive'}${u.instantReady ? ' · ⚡ instant pay' : ''}${u.cashtag ? ` · 💚 ${esc(u.cashtag)}` : ''}</div></div></div></td>
-          <td class="num" style="color:var(--green);font-weight:800">${money(d.owed[u.id] || 0)}</td>
-          <td><div class="row" style="gap:.3rem;justify-content:flex-end">
-            ${d.owed[u.id] && u.cashtag ? `<a class="btn sm go" href="https://cash.app/${encodeURIComponent(u.cashtag)}/${Number(d.owed[u.id]).toFixed(2)}" target="_blank" rel="noopener" data-act="cashapp-open" data-id="${esc(u.id)}" data-name="${esc(u.name)}" data-amt="${d.owed[u.id]}">💚 Pay ${money(d.owed[u.id])} on Cash App</a>` : ''}
-            ${d.owed[u.id] ? `<button class="btn sm primary" data-act="rep-payout" data-id="${esc(u.id)}" data-name="${esc(u.name)}" data-amt="${d.owed[u.id]}">💸 Mark paid</button>` : ''}
-            <button class="btn sm" data-act="reset-pin" data-id="${esc(u.id)}" data-name="${esc(u.name)}">🔑 PIN</button>
-            ${u.id !== S.user.id ? `<button class="btn sm ${u.active ? 'danger' : ''}" data-act="toggle-user" data-id="${esc(u.id)}" data-active="${u.active ? '1' : ''}">${u.active ? 'Deactivate' : 'Activate'}</button>` : ''}
-          </div></td>
-        </tr>`).join('')}</tbody></table>
-        <p class="tiny muted">"Owed" = commission on deals the client has paid for. Reps with ⚡ instant pay are paid automatically. For Cash App: tap the green button (Cash App opens with the amount filled in), send it, then tap <b>Mark paid</b>.</p>
+      <div class="grid two">
+        <div class="card">
+          <h3>➕ Add a team member</h3>
+          <form class="stack" data-form="add-user">
+            <div class="field"><label>Name</label><input class="input" name="name" placeholder="First name (add a last initial if two people share it)" required></div>
+            <div class="field"><label>PIN they'll log in with (4–8 digits)</label><input class="input" name="pin" inputmode="numeric" pattern="\\d{4,8}" required></div>
+            <div class="field"><label>Role</label><select class="input" name="role"><option value="rep">Sales rep</option>${isOwner ? '<option value="manager">Manager</option>' : ''}</select></div>
+            <button class="btn go block">Add to team</button>
+          </form>
+        </div>
+        <div class="card table-wrap">
+          <h3>👥 Team (${d.users.filter((u) => u.active).length} active)</h3>
+          <table class="tbl"><thead><tr><th>Member</th><th class="num">Owed</th><th></th></tr></thead><tbody>
+          ${d.users.map((u) => {
+            const canEdit = u.id === me.id || isOwner || (u.role === 'rep' && !u.owner);
+            return `<tr style="${u.active ? '' : 'opacity:.5'}">
+            <td><div class="row" style="flex-wrap:nowrap;gap:.5rem"><span class="avatar" style="--c:${esc(u.color)};width:34px;height:34px;font-size:1.1rem">${esc(u.avatar)}</span><div><b>${esc(u.name)}</b>${u.owner ? ' <span class="tag" style="color:var(--gold)">👑 Owner</span>' : ''}<div class="tiny muted">${u.role === 'manager' ? '🛠️ manager' : 'sales rep'}${u.demo ? ' · demo' : ''}${u.active ? '' : ' · inactive'}${u.instantReady ? ' · ⚡ instant pay' : ''}${u.cashtag ? ` · 💚 ${esc(u.cashtag)}` : ''}</div></div></div></td>
+            <td class="num" style="color:var(--green);font-weight:800">${money(d.owed[u.id] || 0)}</td>
+            <td><div class="row" style="gap:.3rem;justify-content:flex-end">
+              ${d.owed[u.id] && u.cashtag ? `<a class="btn sm go" href="https://cash.app/${encodeURIComponent(u.cashtag)}/${Number(d.owed[u.id]).toFixed(2)}" target="_blank" rel="noopener" data-act="cashapp-open" data-id="${esc(u.id)}" data-name="${esc(u.name)}" data-amt="${d.owed[u.id]}">💚 Pay ${money(d.owed[u.id])}</a>` : ''}
+              ${d.owed[u.id] ? `<button class="btn sm primary" data-act="rep-payout" data-id="${esc(u.id)}" data-name="${esc(u.name)}" data-amt="${d.owed[u.id]}">💸 Mark paid</button>` : ''}
+              ${canEdit ? `<button class="btn sm" data-act="edit-user" data-id="${esc(u.id)}">✏️ Edit</button>` : ''}
+            </div></td>
+          </tr>`;
+          }).join('')}</tbody></table>
+          <p class="tiny muted">"Owed" = commission on deals the client has paid for. Reps with ⚡ instant pay are paid automatically. For Cash App: tap the green button (Cash App opens with the amount filled in), send it, then tap <b>Mark paid</b>.</p>
+        </div>
+      </div>
+      <div class="card"><h3>📋 Admin activity</h3>
+        ${audit.length ? audit.slice(0, 15).map((e) => `<div class="small" style="margin:.25rem 0"><span class="muted">${new Date(e.at).toLocaleString()} · ${esc(e.by)}</span> ${esc(e.text)}</div>`).join('') : '<p class="small muted">Team changes (adds, deletes, PIN resets, role changes) show up here.</p>'}
       </div>
     </div>`;
+  }
+
+  function editUserModal(u) {
+    const d = S.admin.data;
+    const me = d.users.find((x) => x.id === S.user.id) || S.user;
+    const isOwner = Boolean(me.owner);
+    const self = u.id === me.id;
+    const canRole = isOwner && !u.owner;
+    modal(`<h2>✏️ ${esc(u.name)}</h2>
+      <form class="stack" data-form="edit-user" data-id="${esc(u.id)}">
+        <div class="field"><label>Name</label><input class="input" name="name" value="${esc(u.name)}" required></div>
+        <div class="field"><label>New PIN (leave blank to keep)</label><input class="input" name="pin" inputmode="numeric" pattern="\\d{4,8}" placeholder="4–8 digits"></div>
+        ${canRole ? `<div class="field"><label>Role</label><select class="input" name="role"><option value="rep" ${u.role === 'rep' ? 'selected' : ''}>Sales rep</option><option value="manager" ${u.role === 'manager' ? 'selected' : ''}>Manager</option></select></div>` : ''}
+        <button class="btn go block">💾 Save</button>
+      </form>
+      <div class="stack" style="margin-top:1rem">
+        ${!self && !u.owner ? `<button class="btn block" data-act="toggle-user" data-id="${esc(u.id)}" data-active="${u.active ? '1' : ''}">${u.active ? '⏸️ Deactivate (can\'t log in, keeps everything)' : '▶ Activate'}</button>` : ''}
+        ${isOwner && !u.owner && u.active ? `<button class="btn block" data-act="make-owner" data-id="${esc(u.id)}" data-name="${esc(u.name)}">👑 Make ${esc(u.name)} the owner</button>` : ''}
+        ${!self && !u.owner && (isOwner || u.role === 'rep') ? `<button class="btn danger block" data-act="delete-user" data-id="${esc(u.id)}" data-name="${esc(u.name)}">🗑️ Delete ${esc(u.name)} permanently</button>
+          <p class="tiny muted">Deleting removes their login. Their deals and commission history stay, and their open leads go back to the team pool.</p>` : ''}
+      </div>`);
   }
 
   function adminPricing(d) {
@@ -1525,7 +1628,25 @@
       try { await api('PATCH', `/api/admin/users/${el.dataset.id}`, { pin }); toast('🔑 PIN updated', 'good'); } catch (err) { fail(err); }
     },
     'toggle-user': async (el) => {
-      try { await api('PATCH', `/api/admin/users/${el.dataset.id}`, { active: !el.dataset.active }); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
+      try { await api('PATCH', `/api/admin/users/${el.dataset.id}`, { active: !el.dataset.active }); closeModal(); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
+    },
+    'edit-user': (el) => { const u = S.admin.data.users.find((x) => x.id === el.dataset.id); if (u) editUserModal(u); },
+    'make-owner': async (el) => {
+      if (!confirm(`Make ${el.dataset.name} the owner? You'll become a regular manager and they'll have full control.`)) return;
+      try { await api('PATCH', `/api/admin/users/${el.dataset.id}`, { owner: true }); closeModal(); S.user = null; toast(`👑 ${esc(el.dataset.name)} is now the owner.`, 'good'); render(); } catch (err) { fail(err); }
+    },
+    'delete-user': async (el) => {
+      const name = el.dataset.name;
+      if (!confirm(`Delete ${name} permanently? This can't be undone.`)) return;
+      try {
+        await api('DELETE', `/api/admin/users/${el.dataset.id}`);
+      } catch (err) {
+        if (!/still owed/.test(err.message) || !confirm(`${err.message}\n\nDelete anyway?`)) return fail(err);
+        try { await api('DELETE', `/api/admin/users/${el.dataset.id}?force=1`); } catch (err2) { return fail(err2); }
+      }
+      closeModal();
+      toast(`🗑️ ${esc(name)} was removed. Their open leads are back in the pool.`, 'good', 5000);
+      viewAdmin(document.getElementById('view'));
     },
     'save-price': async (el) => {
       const id = el.dataset.id;
@@ -1549,6 +1670,11 @@
       try { const r = await api('POST', `/api/leads/${S.call.lead.id}/drip/stop`); S.call.drip = r.drip; drawCall(); toast('🛑 Emails stopped'); } catch (err) { fail(err); }
     },
     'push-enable': () => { closeModal(); enablePush().then(() => { if (route()[0] === 'home') render(); }).catch(fail); },
+    'ab-status': (el) => adminAction(`/api/admin/experiments/variants/${el.dataset.id}`, el.dataset.s === 'winner' ? '🏆 Winner picked. Everyone now uses it.' : 'Updated', { status: el.dataset.s }, 'PATCH'),
+    'ab-delete': (el) => { if (confirm('Delete this version? Its results stay in the log.')) adminAction(`/api/admin/experiments/variants/${el.dataset.id}`, '🗑️ Deleted', null, 'DELETE'); },
+    'ab-ai': async (el) => { el.disabled = true; el.textContent = '✨ Writing…'; try { await api('POST', '/api/admin/experiments/ai', { slot: el.dataset.slot }); toast('✨ New challenger added. It starts getting calls right away.', 'good'); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); el.disabled = false; } },
+    'ab-ai-new': async (el) => { const slot = el.closest('form').querySelector('[name=slot]').value; el.disabled = true; el.textContent = '✨ Writing…'; try { await api('POST', '/api/admin/experiments/ai', { slot }); toast('✨ Test started with an AI-written challenger.', 'good'); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); el.disabled = false; } },
+    'ab-add': (el) => { S.admin.abSlot = el.dataset.slot; const form = document.querySelector('form[data-form="ab-new"]'); if (!form) return; form.scrollIntoView({ behavior: 'smooth' }); form.querySelector('[name=slot]').value = el.dataset.slot; form.querySelector('textarea').focus(); },
     'test-conn': async (el) => {
       const svc = el.dataset.svc; const out = document.getElementById(`test-${svc}`);
       el.disabled = true; if (out) out.textContent = '⏳ Testing…';
@@ -1580,9 +1706,9 @@
     'demo-clear': async () => { if (!confirm('Remove all demo reps, leads and deals?')) return; try { await api('DELETE', '/api/admin/demo'); toast('Demo data removed'); refreshAfterAdmin(); } catch (err) { fail(err); } },
   };
 
-  async function adminAction(path, msg, body) {
+  async function adminAction(path, msg, body, method = 'POST') {
     try {
-      await api('POST', path, body || {});
+      await api(method, path, method === 'DELETE' ? undefined : body || {});
       if (msg) toast(msg, 'good');
       await viewAdmin(document.getElementById('view'));
     } catch (err) { fail(err); }
@@ -1635,6 +1761,12 @@
     cashtag: async (fd) => {
       try { await api('PATCH', '/api/me/payout', { cashtag: fd.get('cashtag') }); toast('💚 Cash App saved', 'good'); } catch (err) { fail(err); }
     },
+    'ab-new': async (fd, form) => {
+      try { await api('POST', '/api/admin/experiments/variants', { slot: fd.get('slot'), text: fd.get('text') }); toast('🧪 Test started!', 'good'); form.reset(); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
+    },
+    'ab-settings': async (fd) => {
+      try { await api('PATCH', '/api/admin/settings', { abAutoPromote: fd.get('abAutoPromote') === 'on', abAiChallengers: fd.get('abAiChallengers') === 'on', abMinTrials: fd.get('abMinTrials'), abConfidence: fd.get('abConfidence') }); toast('💾 Saved', 'good'); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
+    },
     snapshot: async (fd) => {
       try { await api('PATCH', '/api/admin/settings', { ghlSnapshotId: fd.get('ghlSnapshotId') }); S.catalog = await api('GET', '/api/catalog'); toast('✅ Template saved. New clients get built from it.', 'good'); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
     },
@@ -1643,6 +1775,12 @@
     },
     'test-email': async (fd) => {
       try { await api('POST', '/api/admin/test-email', { to: fd.get('to') }); toast('📨 Test email sent. Check your inbox (and spam folder).', 'good', 5000); } catch (err) { fail(err); }
+    },
+    'edit-user': async (fd, form) => {
+      const body = { name: fd.get('name') };
+      if (fd.get('pin')) body.pin = fd.get('pin');
+      if (fd.get('role')) body.role = fd.get('role');
+      try { await api('PATCH', `/api/admin/users/${form.dataset.id}`, body); closeModal(); toast('💾 Saved', 'good'); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
     },
     'add-user': async (fd, form) => {
       try { const { user } = await api('POST', '/api/admin/users', Object.fromEntries(fd)); toast(`${esc(user.avatar)} ${esc(user.name)} added! Their PIN is what you typed.`, 'good', 5000); form.reset(); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }

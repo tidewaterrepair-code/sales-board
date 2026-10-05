@@ -18,6 +18,8 @@ const ai = require('./ai');
 const payouts = require('./payouts');
 const push = require('./push');
 const backup = require('./backup');
+const experiments = require('./experiments');
+const learn = require('./learn');
 const { AI_ADDON, TASK_OWNERS } = require('./workflows');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -41,6 +43,10 @@ const DEFAULT_SETTINGS = {
   emailDailyCap: 0, // 0 = provider's free-tier default
   timezone: 'America/New_York', // used for new client accounts
   aiMinutesIncluded: 600, // AI receptionist minutes included in the monthly price
+  abAutoPromote: true, // promote a script version once it's clearly the best
+  abMinTrials: 30, // calls each version needs before it can win
+  abConfidence: 95, // how sure (%) before declaring a winner
+  abAiChallengers: true, // after a winner, let the AI write a new version to test
   ghlSnapshotId: '', // your GoHighLevel template (picked in Manager → 🚀 Launch)
   clientLoginUrl: '', // where clients log in, e.g. https://app.yourdomain.com
   refundPolicy: 'All sales are final. No refunds.', // shown before the client pays
@@ -108,11 +114,45 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   const detailsLimit = () => (env.GOOGLE_DETAILS_MONTHLY_LIMIT === undefined ? 1000 : Number(env.GOOGLE_DETAILS_MONTHLY_LIMIT) || 0);
   const detailsUsed = () => db.data.usage.googleDetails?.[monthKey()] || 0;
   function hydrate(lead) {
-    if (!lead || lead.source !== 'google') return lead;
+    if (!lead) return lead;
+    if (lead.source !== 'google') return { ...lead, analysis: leadsLib.analyzeLead(lead, getModel()) };
     const l = live(lead);
-    if (l) return { ...lead, ...l, analysis: leadsLib.analyzeLead(l), id: lead.id, city: lead.city || l.city };
+    if (l) return { ...lead, ...l, analysis: leadsLib.analyzeLead(l, getModel()), id: lead.id, city: lead.city || l.city };
     const c = lead.confirmed || {};
-    return { ...lead, name: c.name || 'Google business (details loading)', phone: c.phone || '', website: c.website || '', address: c.address || '', rating: null, reviews: 0, mapsUrl: '', category: getIndustry(lead.industry).label, detailsMissing: !lead.confirmed };
+    return { ...lead, analysis: lead.analysis ? learn.apply(lead.analysis, lead, getModel()) : lead.analysis, name: c.name || 'Google business (details loading)', phone: c.phone || '', website: c.website || '', address: c.address || '', rating: null, reviews: 0, mapsUrl: '', category: getIndustry(lead.industry).label, detailsMissing: !lead.confirmed };
+  }
+
+  // ---- What the system has learned (recomputed every 10 minutes) ----
+  let model = null;
+  const getModel = () => {
+    if (!model || now() - model.updatedAt > 10 * 60000) model = { ...learn.computeModel(db), updatedAt: now() };
+    return model;
+  };
+  const relearn = () => { model = null; };
+  experiments.seed(db);
+  const abOpts = () => ({ minTrials: Number(settings().abMinTrials) || 30, confidence: (Number(settings().abConfidence) || 95) / 100, autoPromote: settings().abAutoPromote !== false });
+  // After calls are recorded, promote clear winners and (optionally) have the AI
+  // write a new challenger so testing never stops.
+  function learnFrom(slots) {
+    for (const slot of slots) {
+      const r = experiments.evaluate(db, slot, abOpts());
+      if (r && settings().abAiChallengers !== false && ai.client(env, fetchImpl)) {
+        writeChallenger(slot).catch((err) => experiments.log(db, `⚠️ AI couldn't write a new challenger for ${experiments.slotLabel(slot)}: ${err.message}`));
+      }
+    }
+  }
+  async function writeChallenger(slot) {
+    const c = ai.client(env, fetchImpl);
+    if (!c) throw new HttpError(400, 'Add ANTHROPIC_API_KEY to let the AI write new versions.');
+    experiments.ensureOriginal(db, slot);
+    const versions = experiments.variantsFor(db, slot).filter((v) => v.status !== 'deleted').slice(-6);
+    const kind = experiments.kindOf(slot);
+    const text = experiments.cleanText(await ai.writeVariant(c, { kind: experiments.KINDS[kind].label.toLowerCase(), goal: experiments.KINDS[kind].goal, workflow: catalog().find((w) => w.id === experiments.workflowOf(slot)), versions }));
+    if (text.length < 20) throw new Error('The AI wrote something too short.');
+    const v = experiments.newVariant(db, { slot, text, origin: 'ai' });
+    experiments.log(db, `✨ The AI wrote "${v.label}" for ${experiments.slotLabel(slot)} to try to beat the current best.`, { slot, variantId: v.id });
+    db.save();
+    return v;
   }
   async function fetchDetails(lead, { withReviews = false } = {}) {
     if (!googleKey() || lead.source !== 'google') return null;
@@ -153,7 +193,17 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     });
   }
 
-  const safeUser = (u) => u && { id: u.id, name: u.name, avatar: u.avatar, color: u.color, role: u.role, active: u.active !== false };
+  const safeUser = (u) => u && { id: u.id, name: u.name, avatar: u.avatar, color: u.color, role: u.role, active: u.active !== false, owner: Boolean(u.owner) };
+
+  // The owner is the account that set the board up: full admin that nobody
+  // else can delete, demote or lock out. Older boards: the first manager.
+  if (db.users.length && !db.users.some((u) => u.owner)) {
+    const first = db.users.filter((u) => u.role === 'manager' && u.active !== false).sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0))[0];
+    if (first) { first.owner = true; db.save(); }
+  }
+  const audit = (by, text) => {
+    db.data.system.audit = [{ at: now(), by: by?.name || 'system', text }, ...(db.data.system.audit || [])].slice(0, 200);
+  };
 
   function claimExpired(lead) {
     if (lead.status === 'won') return false;
@@ -260,7 +310,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     const name = String(body.name || '').trim();
     if (!name) throw new HttpError(400, 'Enter your name.');
     if (!auth.validPin(body.pin)) throw new HttpError(400, 'PIN must be 4–8 digits.');
-    const user = { id: id('usr'), name, avatar: body.avatar || '👑', color: COLORS[0], role: 'manager', pinHash: auth.hashPin(body.pin), active: true, createdAt: now() };
+    const user = { id: id('usr'), name, avatar: body.avatar || '👑', color: COLORS[0], role: 'manager', owner: true, pinHash: auth.hashPin(body.pin), active: true, createdAt: now() };
     db.users.push(user);
     if (body.companyName) db.settings.companyName = String(body.companyName).slice(0, 60);
     db.save();
@@ -497,8 +547,8 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
         const owner = db.users.find((u) => u.id === existing.repId);
         claim = { mine: existing.repId === user.id, by: owner?.name || 'someone', leadId: existing.id, status: existing.status };
       }
-      return { ...l, analysis: leadsLib.analyzeLead(l), claim, dnc: isDnc(l) };
-    }).sort((a, b) => b.analysis.score - a.analysis.score);
+      return { ...l, analysis: leadsLib.analyzeLead(l, getModel()), claim, dnc: isDnc(l) };
+    }).sort((a, b) => b.analysis.score - a.analysis.score); // learned scores rank first
     return { leads, nextPageToken: result.nextPageToken, demo: !googleKey() };
   });
 
@@ -565,7 +615,10 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     const raw = myLead(user, params.id);
     await ensureDetails([raw]);
     const lead = hydrate(raw);
-    return { lead, deals: db.deals.filter((d) => d.leadId === lead.id).map(setup.publicDeal), drip: drip.summaryFor(db, lead.id) };
+    const before = JSON.stringify(raw.variants || {});
+    const scripts = experiments.assign(db, raw); // which script versions this lead gets
+    if (JSON.stringify(raw.variants) !== before) db.save();
+    return { lead, scripts, deals: db.deals.filter((d) => d.leadId === lead.id).map(setup.publicDeal), drip: drip.summaryFor(db, lead.id) };
   });
 
   route('POST', '/api/leads/:id/outcome', ({ params, body, user }) => {
@@ -580,6 +633,8 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     const labels = { no_answer: 'No answer', not_interested: 'Not interested', callback: 'Call back later', interested: 'Interested!' };
     addEvent(user, outcome, points, { leadId: lead.id, label: outcome === 'interested' ? `got a ${getIndustry(lead.industry).trade} lead interested` : '' });
     if (outcome === 'interested' || outcome === 'callback') confirmLead(lead);
+    const pitched = Array.isArray(body.pitched) ? body.pitched.map(String).slice(0, 10) : [];
+    learnFrom(experiments.record(db, lead, outcome, pitched));
     if (outcome === 'not_interested' && body.dnc) {
       const h = hydrate(lead);
       db.data.dnc.push({ placeId: lead.placeId, phone: phoneKey(h.phone), at: now(), by: user.name });
@@ -703,6 +758,8 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       if (deal.contact.name) rawLead.contactName = deal.contact.name;
       drip.enroll(db, { email: deal.contact.email, name: deal.contact.name, lead: rawLead, deal, sequence: 'customer', by: rep.id, now: now() });
     }
+    learnFrom(experiments.record(db, rawLead, 'won', workflows.map((w) => w.id)));
+    relearn();
     db.save();
     startProvisioning(deal); // builds everything for the client; the screen shows live progress
     return { deal: dealOut(deal), onboardingUrl: `${publicUrl()}/onboard/${deal.onboardingToken}`, stats: game.repStats(db, rep.id, settings(), now()) };
@@ -779,7 +836,8 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     };
   }, { admin: true });
 
-  route('POST', '/api/admin/users', ({ body }) => {
+  route('POST', '/api/admin/users', ({ body, user: me }) => {
+    if (body.role === 'manager' && !me.owner) throw new HttpError(403, 'Only the owner can add managers.');
     const name = String(body.name || '').trim().slice(0, 40);
     if (!name) throw new HttpError(400, 'Name is required.');
     if (!auth.validPin(body.pin)) throw new HttpError(400, 'PIN must be 4–8 digits.');
@@ -787,25 +845,77 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     const n = db.users.length;
     const user = { id: id('usr'), name, avatar: AVATARS.includes(body.avatar) ? body.avatar : AVATARS[n % AVATARS.length], color: COLORS[n % COLORS.length], role: body.role === 'manager' ? 'manager' : 'rep', pinHash: auth.hashPin(body.pin), active: true, createdAt: now() };
     db.users.push(user);
+    audit(me, `Added ${user.role} ${user.name}`);
     db.save();
     return { user: safeUser(user) };
   }, { admin: true });
 
+  // Who may change whom: anyone can change their own name/PIN; managers manage
+  // reps; only the owner manages other managers; nobody touches the owner.
+  const canManage = (me, u) => me.id === u.id || me.owner || (u.role === 'rep' && !u.owner);
+
   route('PATCH', '/api/admin/users/:id', ({ params, body, user: me }) => {
     const u = db.users.find((x) => x.id === params.id);
     if (!u) throw new HttpError(404, 'User not found.');
-    if (body.name) u.name = String(body.name).trim().slice(0, 40);
+    if (!canManage(me, u)) throw new HttpError(403, u.owner ? 'Nobody can change the owner\'s account but the owner.' : 'Only the owner can change other managers.');
+    if (body.name) {
+      const name = String(body.name).trim().slice(0, 40);
+      if (db.users.some((x) => x !== u && x.name.toLowerCase() === name.toLowerCase() && x.active !== false)) throw new HttpError(400, 'Someone already has that name.');
+      u.name = name;
+    }
     if (body.avatar && AVATARS.includes(body.avatar)) u.avatar = body.avatar;
-    if (body.pin) { if (!auth.validPin(body.pin)) throw new HttpError(400, 'PIN must be 4–8 digits.'); u.pinHash = auth.hashPin(body.pin); }
-    if (body.role && u.id !== me.id) u.role = body.role === 'manager' ? 'manager' : 'rep';
+    if (body.pin) { if (!auth.validPin(body.pin)) throw new HttpError(400, 'PIN must be 4–8 digits.'); u.pinHash = auth.hashPin(body.pin); audit(me, `Reset PIN for ${u.name}`); }
+    if (body.role && body.role !== u.role) {
+      if (!me.owner) throw new HttpError(403, 'Only the owner can change who is a manager.');
+      if (u.owner) throw new HttpError(400, 'The owner is always a manager.');
+      u.role = body.role === 'manager' ? 'manager' : 'rep';
+      audit(me, `Made ${u.name} a ${u.role}`);
+    }
+    if (body.owner === true && !u.owner) {
+      if (!me.owner) throw new HttpError(403, 'Only the owner can hand over ownership.');
+      if (u.active === false) throw new HttpError(400, 'Activate them first.');
+      me.owner = false;
+      u.owner = true;
+      u.role = 'manager';
+      audit(me, `Handed ownership to ${u.name}`);
+    }
     if (typeof body.active === 'boolean') {
       if (u.id === me.id && !body.active) throw new HttpError(400, 'You can\'t deactivate yourself.');
+      if (u.owner && !body.active) throw new HttpError(400, 'The owner can\'t be deactivated.');
       u.active = body.active;
       if (!body.active) db.data.sessions = db.sessions.filter((s) => s.userId !== u.id);
+      audit(me, `${body.active ? 'Activated' : 'Deactivated'} ${u.name}`);
     }
     db.save();
     return { user: safeUser(u) };
   }, { admin: true });
+
+  // Permanently removes a team member. Their deals, commission history and
+  // stats stay (deals keep their name); their open leads go back to the pool.
+  route('DELETE', '/api/admin/users/:id', ({ params, query, user: me }) => {
+    const u = db.users.find((x) => x.id === params.id);
+    if (!u) throw new HttpError(404, 'User not found.');
+    if (u.id === me.id) throw new HttpError(400, 'You can\'t delete yourself.');
+    if (u.owner) throw new HttpError(400, 'The owner can\'t be deleted. Hand over ownership first.');
+    if (u.role === 'manager' && !me.owner) throw new HttpError(403, 'Only the owner can delete managers.');
+    const owed = game.round2(db.deals.filter((d) => d.repId === u.id && d.status !== 'cancelled' && d.commissionStatus === 'earned').reduce((s2, d) => s2 + d.commission, 0));
+    const pending = game.round2(db.deals.filter((d) => d.repId === u.id && d.status !== 'cancelled' && d.commissionStatus === 'pending').reduce((s2, d) => s2 + d.commission, 0));
+    if ((owed || pending) && query.force !== '1') {
+      const e = new HttpError(409, `${u.name} is still owed ${money(owed)}${pending ? ` (plus ${money(pending)} waiting on client payments)` : ''}. Pay them first, or delete anyway.`);
+      throw e;
+    }
+    let released = 0;
+    for (const l of db.leads) {
+      if (l.repId === u.id && l.status !== 'won') { l.repId = null; l.history.push({ at: now(), by: me.name, text: `Back to the pool (${u.name} was removed)` }); released++; }
+    }
+    db.data.users = db.users.filter((x) => x.id !== u.id);
+    db.data.sessions = db.sessions.filter((x) => x.userId !== u.id);
+    audit(me, `Deleted ${u.role} ${u.name}${owed || pending ? ` (still owed ${money(owed + pending)})` : ''}; ${released} lead(s) back to the pool`);
+    db.save();
+    return { ok: true, released };
+  }, { admin: true });
+
+  route('GET', '/api/admin/audit', () => ({ entries: db.data.system.audit || [] }), { admin: true });
 
   const dealById = (dealId) => {
     const d = db.deals.find((x) => x.id === dealId);
@@ -899,6 +1009,10 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       if (u && !/^https?:\/\//.test(u)) throw new HttpError(400, 'Client login link must start with https://');
       s.clientLoginUrl = u;
     }
+    if (body.abAutoPromote != null) s.abAutoPromote = body.abAutoPromote === true || body.abAutoPromote === 'on' || body.abAutoPromote === 'true';
+    if (body.abAiChallengers != null) s.abAiChallengers = body.abAiChallengers === true || body.abAiChallengers === 'on' || body.abAiChallengers === 'true';
+    if (body.abMinTrials != null) s.abMinTrials = Math.max(10, Math.min(1000, Number.parseInt(body.abMinTrials, 10) || 30));
+    if (body.abConfidence != null) s.abConfidence = Math.max(80, Math.min(99, Number.parseInt(body.abConfidence, 10) || 95));
     if (body.refundPolicy != null) s.refundPolicy = String(body.refundPolicy).trim().slice(0, 500);
     if (body.autoPayouts != null) s.autoPayouts = body.autoPayouts === true || body.autoPayouts === 'on' || body.autoPayouts === 'true';
     if (body.payoutHoldDays != null) s.payoutHoldDays = Math.max(0, Math.min(120, Number.parseInt(body.payoutHoldDays, 10) || 0));
@@ -1048,10 +1162,64 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       bestHours: scoredHours.slice(0, 3),
       hours,
       bundles: Object.values(bundles).sort((a, b) => b.deals - a.deals).slice(0, 8),
+      learned: { notes: getModel().notes, calledLeads: getModel().calledLeads, deals: getModel().deals, minLeads: learn.MIN_LEADS, minDeals: learn.MIN_DEALS },
+      log: (db.data.system.learningLog || []).slice(0, 20),
     };
   }
   route('GET', '/api/admin/insights', () => insights(), { admin: true });
   route('GET', '/api/insights/best-time', () => ({ bestHours: insights().bestHours.slice(0, 2) }));
+
+  // ---- 🧪 Script experiments (A/B tests) ----
+  route('GET', '/api/admin/experiments', () => {
+    const tested = new Set(db.data.variants.filter((v) => v.status !== 'deleted').map((v) => v.slot));
+    return {
+      slots: experiments.ALL_SLOTS.map((slot) => ({ slot, label: experiments.slotLabel(slot), tested: tested.has(slot) })),
+      tests: [...tested].map((slot) => experiments.summary(db, slot)),
+      settings: abOpts(),
+      aiReady: Boolean(ai.client(env, fetchImpl)),
+      log: (db.data.system.learningLog || []).slice(0, 30),
+      placeholders: experiments.PLACEHOLDERS,
+    };
+  }, { admin: true });
+  route('POST', '/api/admin/experiments/variants', ({ body, user }) => {
+    const slot = String(body.slot || '');
+    if (!experiments.ALL_SLOTS.includes(slot)) throw new HttpError(400, 'Pick which part of the script to test.');
+    const text = experiments.cleanText(body.text);
+    if (text.length < 15) throw new HttpError(400, 'Write the new version first (at least a sentence).');
+    if (experiments.variantsFor(db, slot).filter((v) => v.status === 'active' || v.status === 'winner').length >= 5) throw new HttpError(400, 'Five versions are already being tested here. Pause one first.');
+    experiments.ensureOriginal(db, slot);
+    const v = experiments.newVariant(db, { slot, text, origin: 'manager', label: body.label ? String(body.label).slice(0, 40) : undefined });
+    experiments.log(db, `✍️ ${user.name} added "${v.label}" to ${experiments.slotLabel(slot)}.`, { slot, variantId: v.id });
+    db.save();
+    return { variant: v };
+  }, { admin: true });
+  route('PATCH', '/api/admin/experiments/variants/:id', ({ params, body, user }) => {
+    const v = db.data.variants.find((x) => x.id === params.id);
+    if (!v) throw new HttpError(404, 'Version not found.');
+    if (body.status === 'winner') {
+      for (const o of experiments.variantsFor(db, v.slot)) if (o !== v && (o.status === 'active' || o.status === 'winner')) o.status = 'retired';
+      v.status = 'winner';
+      experiments.log(db, `👆 ${user.name} picked "${v.label}" as the winner for ${experiments.slotLabel(v.slot)}.`, { slot: v.slot });
+    } else if (['active', 'paused', 'retired'].includes(body.status)) {
+      v.status = body.status;
+    }
+    if (body.text != null && v.shown === 0) v.text = experiments.cleanText(body.text); // can only edit before it's been used
+    db.save();
+    return { variant: v };
+  }, { admin: true });
+  route('DELETE', '/api/admin/experiments/variants/:id', ({ params }) => {
+    const v = db.data.variants.find((x) => x.id === params.id);
+    if (!v) throw new HttpError(404, 'Version not found.');
+    if (v.origin === 'built-in') throw new HttpError(400, 'The original script can be paused or retired, not deleted.');
+    v.status = 'deleted';
+    db.save();
+    return { ok: true };
+  }, { admin: true });
+  route('POST', '/api/admin/experiments/ai', async ({ body }) => {
+    const slot = String(body.slot || '');
+    if (!experiments.ALL_SLOTS.includes(slot)) throw new HttpError(400, 'Pick which part of the script to test.');
+    return { variant: await writeChallenger(slot) };
+  }, { admin: true });
 
   route('GET', '/api/admin/ghl/snapshots', async () => {
     if (!provision.connected(env, settings()).ghl) throw new HttpError(400, 'Connect GoHighLevel first (GHL_API_KEY + GHL_COMPANY_ID).');

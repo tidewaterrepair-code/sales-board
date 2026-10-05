@@ -853,3 +853,147 @@ test('my deals list is reachable (route order)', async () => {
   assert.strictEqual(r.status, 200);
   assert.deepStrictEqual(r.body.deals, []);
 });
+
+test('A/B: the seeded opener test assigns sticky versions and counts real conversations', async () => {
+  const { db, call } = setup();
+  const { rep } = await managerAndRep(call);
+  const openers = db.data.variants.filter((v) => v.slot === 'opener');
+  assert.strictEqual(openers.length, 2, 'original + seeded challenger');
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Test Co', phone: '7575550101', industry: 'hvac' } } })).body.lead;
+  const first = (await call('GET', `/api/leads/${lead.id}`, { token: rep })).body.scripts.opener;
+  const again = (await call('GET', `/api/leads/${lead.id}`, { token: rep })).body.scripts.opener;
+  assert.strictEqual(first.variantId, again.variantId, 'same lead always gets the same version');
+  assert.strictEqual(first.testing, true);
+  // No answer = they never heard the opener: not counted.
+  await call('POST', `/api/leads/${lead.id}/outcome`, { token: rep, body: { outcome: 'no_answer' } });
+  let v = db.data.variants.find((x) => x.id === first.variantId);
+  assert.strictEqual(v.shown, 0);
+  await call('POST', `/api/leads/${lead.id}/outcome`, { token: rep, body: { outcome: 'callback', pitched: ['missed_call_textback'] } });
+  v = db.data.variants.find((x) => x.id === first.variantId);
+  assert.strictEqual(v.shown, 1);
+  assert.strictEqual(v.wins, 1);
+  // A second outcome on the same lead doesn't double count.
+  await call('POST', `/api/leads/${lead.id}/outcome`, { token: rep, body: { outcome: 'interested', pitched: ['missed_call_textback'] } });
+  assert.strictEqual(db.data.variants.find((x) => x.id === first.variantId).shown, 1);
+});
+
+test('A/B: Thompson sampling sends more traffic to the better version and promotes a clear winner', () => {
+  const exp = require('../src/experiments');
+  const db = new DB(null);
+  exp.ensureOriginal(db, 'close:review_engine');
+  const b = exp.newVariant(db, { slot: 'close:review_engine', text: 'Want me to set it up today for {{setup}}?', origin: 'manager' });
+  const a = db.data.variants.find((v) => v.origin === 'built-in' && v.slot === 'close:review_engine');
+  a.shown = 100; a.wins = 10; b.shown = 100; b.wins = 30;
+  let seed = 7;
+  const rand = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+  let pickedB = 0;
+  for (let i = 0; i < 300; i++) {
+    const lead = { id: `l${i}` };
+    if (exp.assign(db, lead, rand)['close:review_engine'].variantId === b.id) pickedB++;
+  }
+  assert.ok(pickedB > 250, `better version should get most traffic (got ${pickedB}/300)`);
+  const r = exp.evaluate(db, 'close:review_engine', { minTrials: 30, confidence: 0.95, rand });
+  assert.ok(r, 'a winner should be declared');
+  assert.strictEqual(r.winner.id, b.id);
+  assert.strictEqual(b.status, 'winner');
+  assert.strictEqual(a.status, 'retired');
+  assert.match(db.data.system.learningLog[0].text, /won with 30%/);
+  // Not enough calls yet = no winner.
+  const db2 = new DB(null);
+  exp.ensureOriginal(db2, 'opener');
+  const c = exp.newVariant(db2, { slot: 'opener', text: 'Hello {{business}}, this is {{rep}}.', origin: 'manager' });
+  c.shown = 10; c.wins = 9;
+  assert.strictEqual(exp.evaluate(db2, 'opener', { minTrials: 30 }), null);
+});
+
+test('A/B: a closed deal counts as a win for the pitch and close the rep used', async () => {
+  const { db, app, call } = setup();
+  const { manager, rep } = await managerAndRep(call);
+  const add = await call('POST', '/api/admin/experiments/variants', { token: manager, body: { slot: 'close:missed_call_textback', text: 'I can have it live this week. It is {{setup}} to start and {{monthly}} a month. Shall I set it up? {{hacker}}' } });
+  assert.strictEqual(add.status, 200);
+  assert.ok(!add.body.variant.text.includes('hacker'), 'unknown fill-ins are stripped');
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Closer Co', phone: '7575550102', industry: 'plumber' } } })).body.lead;
+  const scripts = (await call('GET', `/api/leads/${lead.id}`, { token: rep })).body.scripts;
+  assert.ok(scripts['close:missed_call_textback']);
+  const r = await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['missed_call_textback'] } });
+  await app.waitForProvisioning(r.body.deal.id);
+  const used = db.data.variants.find((v) => v.id === scripts['close:missed_call_textback'].variantId);
+  assert.strictEqual(used.shown, 1);
+  assert.strictEqual(used.wins, 1);
+  const list = (await call('GET', '/api/admin/experiments', { token: manager })).body;
+  assert.ok(list.tests.some((t) => t.slot === 'close:missed_call_textback' && t.variants.length === 2));
+  // Reps can't manage experiments.
+  assert.strictEqual((await call('GET', '/api/admin/experiments', { token: rep })).status, 403);
+});
+
+test('A/B: after a winner, the AI writes a new challenger automatically', async () => {
+  const fetchImpl = async (url) => {
+    if (String(url).includes('api.anthropic.com')) {
+      return new Response(JSON.stringify({ id: 'm', type: 'message', role: 'assistant', model: 'claude-opus-5-5', stop_reason: 'end_turn', content: [{ type: 'text', text: '"Hi {{business}}, it\'s {{rep}}. Can I ask how you handle calls you miss on a busy day?"' }], usage: { input_tokens: 1, output_tokens: 1 } }), { status: 200, headers: { 'content-type': 'application/json' } });
+    }
+    return new Response('{}', { status: 200, headers: { 'content-type': 'application/json' } });
+  };
+  const { db, call } = setup({ ANTHROPIC_API_KEY: 'sk-ant-x' }, fetchImpl);
+  const { manager } = await managerAndRep(call);
+  const r = await call('POST', '/api/admin/experiments/ai', { token: manager, body: { slot: 'opener' } });
+  assert.strictEqual(r.status, 200, JSON.stringify(r.body));
+  assert.strictEqual(r.body.variant.origin, 'ai');
+  assert.ok(r.body.variant.text.startsWith('Hi {{business}}'), 'quotes trimmed, fill-ins kept');
+  assert.strictEqual(db.data.variants.filter((v) => v.slot === 'opener').length, 3);
+});
+
+test('learning: lead scores and recommendations adapt to what actually closes', () => {
+  const learn = require('../src/learn');
+  const { analyzeLead } = require('../src/leads');
+  const db = new DB(null);
+  // 40 called dentists: the busy, well-reviewed ones close; the no-website ones never do.
+  for (let i = 0; i < 40; i++) {
+    const busy = i % 2 === 0;
+    const lead = { id: `L${i}`, industry: 'dentist', status: busy ? 'won' : 'lost', analysis: { signals: busy ? [{ key: 'busy' }] : [{ key: 'no_website' }] } };
+    db.leads.push(lead);
+    if (busy) db.deals.push({ id: `D${i}`, leadId: lead.id, status: 'paid', business: { industry: 'dentist' }, workflows: [{ id: 'booking_noshow' }] });
+  }
+  const model = learn.computeModel(db);
+  assert.ok(model.signalBonus.busy > 0);
+  assert.ok(model.signalBonus.no_website < 0);
+  assert.ok(model.notes.length > 0);
+  const raw = { name: 'X', phone: '1', website: '', rating: 4.8, reviews: 300, industry: 'dentist' };
+  const plain = analyzeLead({ ...raw, website: 'https://x' });
+  const learned = analyzeLead({ ...raw, website: 'https://x' }, model);
+  assert.ok(learned.score > plain.score, 'busy dentists rank higher after learning');
+  assert.strictEqual(learned.recommended[0], 'booking_noshow', 'recommends what dentists actually buy');
+  assert.ok(learned.learned.length > 0);
+});
+
+test('admin: owner is protected; managers add/edit/delete reps; deleting keeps history', async () => {
+  const { db, call } = setup();
+  const { manager, rep, repId } = await managerAndRep(call);
+  const me = (await call('GET', '/api/me', { token: manager })).body.user;
+  assert.strictEqual(me.owner, true);
+  // Owner adds a second manager; that manager can't add managers or delete the owner.
+  const m2 = await call('POST', '/api/admin/users', { token: manager, body: { name: 'Sam', pin: '2222', role: 'manager' } });
+  const sam = (await call('POST', '/api/login', { body: { userId: m2.body.user.id, pin: '2222' } })).body.token;
+  assert.strictEqual((await call('POST', '/api/admin/users', { token: sam, body: { name: 'Pat', pin: '3333', role: 'manager' } })).status, 403);
+  assert.strictEqual((await call('DELETE', `/api/admin/users/${me.id}`, { token: sam })).status, 400);
+  assert.strictEqual((await call('PATCH', `/api/admin/users/${me.id}`, { token: sam, body: { active: false } })).status, 403);
+  // Sam can manage reps.
+  assert.strictEqual((await call('PATCH', `/api/admin/users/${repId}`, { token: sam, body: { name: 'Maria G' } })).status, 200);
+  // Rep with an open lead and an earned commission.
+  const lead1 = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Open Lead Co', phone: '7575550103', industry: 'hvac' } } })).body.lead;
+  const lead2 = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Won Co', phone: '7575550104', industry: 'hvac' } } })).body.lead;
+  const d = (await call('POST', '/api/deals', { token: rep, body: { leadId: lead2.id, workflowIds: ['review_engine'] } })).body.deal;
+  await call('POST', `/api/admin/deals/${d.id}/paid`, { token: manager });
+  const blocked = await call('DELETE', `/api/admin/users/${repId}`, { token: sam });
+  assert.strictEqual(blocked.status, 409);
+  assert.match(blocked.body.error, /still owed \$34\.70/);
+  const del = await call('DELETE', `/api/admin/users/${repId}?force=1`, { token: sam });
+  assert.strictEqual(del.status, 200);
+  assert.ok(!db.users.some((u) => u.id === repId));
+  assert.strictEqual(db.leads.find((l) => l.id === lead1.id).repId, null, 'open lead back to the pool');
+  assert.strictEqual(db.deals[0].repName, 'Maria G', 'deal history keeps their name');
+  assert.strictEqual((await call('GET', '/api/me', { token: rep })).status, 401, 'deleted user is logged out');
+  // Only the owner can delete managers; the owner can.
+  assert.strictEqual((await call('DELETE', `/api/admin/users/${m2.body.user.id}`, { token: manager })).status, 200);
+  const log = (await call('GET', '/api/admin/audit', { token: manager })).body.entries;
+  assert.ok(log.some((e) => /Deleted rep Maria G/.test(e.text)));
+});

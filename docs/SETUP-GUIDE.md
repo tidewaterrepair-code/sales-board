@@ -311,11 +311,41 @@ If something isn't green:
 
 ---
 
+## 👑 Part 11b: You're the owner (admin)
+
+The account you made in Part 4 is the **owner**: full admin, and nobody else can delete, demote or lock it out.
+
+- **Add someone:** Manager → 👥 Team & Payouts → type a name + PIN → **Add to team**. Only you can add **managers**. Managers can add sales reps.
+- **Change or remove someone:** tap **✏️ Edit** next to their name to rename them, set a new PIN, make them a manager, deactivate them (keeps everything, blocks login) or **🗑️ Delete** them for good. Deleting keeps their deals and commission history, and sends their open leads back to the team pool. If they're still owed commission, it warns you first.
+- **Hand over the business?** Edit the person → **👑 Make them the owner**.
+- **Everything is logged** under **📋 Admin activity**.
+- **Locked out or forgot your PIN?** In the SSH window:
+  ```bash
+  cd ~/sales-board
+  npm run admin -- list                      # see everyone
+  npm run admin -- reset-pin "Your Name" 4821
+  sudo systemctl restart salesboard
+  ```
+  `npm run admin -- make-owner "Name"` also gives full owner access back to anyone.
+
 ## 💰 Part 12: Go live (5 minutes)
 
 1. In **Stripe**, finish **Activate account** (it asks for your business and bank details), then turn **Test mode OFF**.
 2. Repeat **Part 7** with the **live** keys (they start with `sk_live_` and a new `whsec_`).
 3. Tell your reps: **"Go sell!"** 🚀
+
+---
+
+## 🧠 Part 13: Let it learn (nothing to set up)
+
+SalesBoard gets better on its own the more your team calls.
+
+- **Script A/B tests:** **Manager → 🧪 A/B Tests**. One test is already running: two different openers. Each lead gets one version; reps just read what's on screen (a small 🧪 tag shows a line is being tested).
+  - Versions that win more calls automatically get used more.
+  - Once one is clearly better (95% sure, after 30+ calls each), it becomes everyone's script, and the result goes in the **📜 Learning log**.
+  - With an Anthropic key (Part 9b), the AI then writes a new challenger to try to beat the winner, so it keeps improving forever.
+  - Want to test your own idea? Pick the part (the opener, or any workflow's pitch or close), write your version, press **Start testing it**.
+- **Smarter lead scores:** after your team has called 20+ leads with a signal (like "no website") or in a business type, SalesBoard learns which ones actually buy and adjusts scores. You'll see a 🧠 tag on leads. After 5+ deals in a business type, it also recommends what that type actually buys. See **📈 Insights → 🧠 What the system learned**.
 
 ---
 
@@ -327,7 +357,8 @@ If something isn't green:
 | "Free Google searches are used up" | That's the money-saver working. It resets next month. |
 | Emails say "queued" | Manager → 📧 Email Drip tells you exactly what's missing |
 | Website won't open | In the SSH window: `sudo systemctl restart salesboard`. Check the tunnel says **Healthy** in Cloudflare. |
-| Want a backup | Copy `~/sales-board/data/db.json` somewhere safe every week |
+| Want a backup | Manager → ⚙️ Settings → **⬇️ Download a copy** (nightly backups also run automatically) |
+| Forgot your PIN / locked out | SSH window: `cd ~/sales-board && npm run admin -- reset-pin "Your Name" 1234 && sudo systemctl restart salesboard` |
 | Update SalesBoard later | SSH window: `cd ~/sales-board && git pull && npm ci --omit=dev && sudo systemctl restart salesboard` |
 | A rep's commission says "waiting" | The client's card payment is still clearing in Stripe (about 2 business days). It sends by itself. Keep a balance cushion (Part 7b) to skip the wait. |
 | Rep isn't getting notifications | On iPhone it only works from the Home Screen icon. Have them tap 🔔 Turn on again. |

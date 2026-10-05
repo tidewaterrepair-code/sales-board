@@ -310,3 +310,9 @@ table.tbl { width: 100%; border-collapse: collapse; }
 .hour { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: flex-end; height: 100%; }
 .hour i { display: block; width: 100%; min-height: 2px; border-radius: 6px 6px 2px 2px; background: var(--brand); }
 .hour span { font-size: .65rem; color: var(--muted); margin-top: 3px; }
+
+/* ---------- A/B tests ---------- */
+.ab-tag { margin-left: .4rem; padding: .05rem .45rem; border-radius: 99px; background: rgba(176, 107, 255, .2); color: #dcc0ff; font-size: .7rem; letter-spacing: 0; text-transform: none; }
+.ab-row { padding: .7rem .8rem; border-radius: 12px; background: #121a3d; border: 1px solid var(--line); }
+.ab-row.winner { border-color: var(--gold); background: rgba(255, 210, 63, .07); }
+.ab-row.retired, .ab-row.paused { opacity: .6; }
