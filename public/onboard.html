@@ -57,10 +57,11 @@
           <p class="muted">${esc(d.repName)} got everything started. Here's what you're getting:</p>
           <ul class="items">${d.workflows.map((w) => `<li>${esc(w.emoji)} <b>${esc(w.name)}</b></li>`).join('')}</ul>
           <div class="total"><b>${money(d.setupTotal)}</b> one-time setup${d.monthlyTotal ? (d.billing === 'yearly' ? ` + <b>${money(d.yearlyTotal)}</b>/year (2 months free)` : ` + <b>${money(d.monthlyTotal)}</b>/month`) : ''}</div>
+          ${d.monthlyTotal ? `<p class="muted" style="font-size:.85rem;margin:.6rem 0 0">🔁 <b>Auto-pay:</b> after today, your plan is charged to the same card every ${d.billing === 'yearly' ? 'year' : 'month'} automatically. Nothing to remember. Cancel anytime from your billing page; cancelling stops the next charge.</p>` : ''}
           ${d.refundPolicy ? `<p class="muted" style="font-size:.85rem;margin:.4rem 0 0">${esc(d.refundPolicy)}</p>` : ''}
         </div>
         ${showPay ? `<div class="card"><h2><span class="step">1</span>Secure your spot</h2><a class="btn pay" href="${esc(d.paymentUrl)}">💳 Pay setup fee securely</a><p class="muted" style="font-size:.85rem;margin-bottom:0">Payments are processed by Stripe.</p></div>` : ''}
-        ${justPaid || d.paid ? '<div class="card">✅ <b>Payment received. Thank you!</b></div>' : ''}
+        ${justPaid || d.paid ? `<div class="card">✅ <b>Payment received. Thank you!</b>${autopayHtml(d)}</div>` : ''}
         <form class="card" id="f">
           <h2>${showPay ? '<span class="step">2</span>' : ''}Tell us a few details (about 3 minutes)</h2>
           <div class="field"><label>Your name</label><input name="c_name" value="${esc(d.contact.name)}" required></div>
@@ -96,7 +97,21 @@
       root.innerHTML = `<div class="card done"><div class="big">🎉</div><h1>You're all set!</h1>
         <p class="muted">Your account is set up and we're finishing your ${d.workflows.length > 1 ? 'workflows' : 'workflow'} now. We'll reach out within one business day.</p>
         ${d.loginUrl ? `<p><a class="btn go" href="${esc(d.loginUrl)}">🔑 Log in to your account</a></p><p class="muted" style="font-size:.85rem">First time? Click "Forgot password" and use your email to set your password.</p>` : ''}
-        ${stillNeedsPay && d.paymentUrl ? `<a class="btn pay" href="${esc(d.paymentUrl)}">💳 One last step: pay setup fee</a>` : ''}</div>`;
+        ${stillNeedsPay && d.paymentUrl ? `<a class="btn pay" href="${esc(d.paymentUrl)}">💳 One last step: pay setup fee</a>` : ''}</div>
+        ${d.paid && d.autopay ? `<div class="card">${autopayHtml(d)}</div>` : ''}`;
+    }
+
+    function autopayHtml(d) {
+      const a = d.autopay;
+      if (!a) return '';
+      const day = (ts) => new Date(ts).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+      const every = d.billing === 'yearly' ? `${money(d.yearlyTotal)}/year` : `${money(d.monthlyTotal)}/month`;
+      let line;
+      if (a.status === 'canceled') line = '🛑 <b>Your plan has ended.</b> You won\'t be charged again.';
+      else if (a.cancelAt) line = `👋 <b>Cancelled.</b> Your service runs until ${day(a.cancelAt)}, and you won't be charged again.`;
+      else if (a.status === 'past_due' || a.status === 'unpaid') line = '⚠️ <b>Your last auto-payment didn\'t go through.</b> Please update your card so your service keeps running.';
+      else line = `🔁 <b>Auto-pay is on:</b> ${every}${a.renewsAt ? `, next charge ${day(a.renewsAt)}` : ''}. Nothing to do. We charge your card automatically.`;
+      return `<p style="margin:.7rem 0">${line}</p>${a.canManage ? '<a class="btn pay" href="/billing/' + encodeURIComponent(token) + '">💳 Manage billing: update card, receipts, or cancel</a>' : ''}`;
     }
   })();
   </script>

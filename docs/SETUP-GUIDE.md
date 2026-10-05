@@ -192,11 +192,38 @@ Right now anyone on the internet can reach your login screen. This adds a second
 2. Click **Developers** → **API keys** → next to **Secret key** click **Reveal** → **copy it** (starts with `sk_test_`).
 3. Still in Developers, click **Webhooks** → **Add endpoint**:
    - **Endpoint URL:** `https://board.yourdomain.com/api/hooks/stripe`
-   - **Select events** → search `checkout.session.completed` → tick it → **Add endpoint**
+   - **Select events** → search for and tick each of these 5 (they keep auto-pay in sync):
+     - `checkout.session.completed` (first payment)
+     - `invoice.paid` (each automatic monthly or yearly charge)
+     - `invoice.payment_failed` (a card got declined)
+     - `customer.subscription.updated` (client cancelled, or undid a cancel)
+     - `customer.subscription.deleted` (their plan ended)
+   - Click **Add endpoint**.
    - On the next page, click **Reveal** under **Signing secret** → **copy it** (starts with `whsec_`).
 4. SSH window: `cd ~/sales-board && npm run setup`. Paste the **Stripe secret key** and the **webhook signing secret**, then `sudo systemctl restart salesboard`.
 
 ✅ **Check:** the Launch checklist shows Stripe ✅. (You'll test a payment in Part 11.)
+
+### 🔁 Part 7a: Auto-pay for clients (5 minutes)
+
+Clients pay **automatically every month** (or every year if they picked yearly) with the card they used the first time. Nobody pays by hand. The only thing a client ever does is **cancel** if they want to stop, from their own billing page. Cancelling stops the **next** charge, they keep service until the end of the time they already paid for, and there are **no refunds**.
+
+SalesBoard sets this up for you. You just flip a few Stripe switches so failed cards get rescued automatically:
+
+1. In Stripe, click the ⚙️ **Settings** gear → **Billing** → **Subscriptions and emails**:
+   - **Manage failed payments** → turn on **Smart Retries** (Stripe tries the card again over the next couple of weeks). For **"If all retries for a payment fail"** choose **Cancel the subscription**.
+   - **Emails** → turn on **"Send emails when card payments fail"** and **"Send emails about expiring cards"**. Stripe emails the client a link to fix their card for you.
+   - If you sell yearly plans, also turn on **"Send a reminder email 7 days before renewal"**.
+2. ⚙️ Settings → **Business** → **Customer emails** → turn on **Successful payments** so clients get a receipt every month.
+3. ⚙️ Settings → **Billing** → **Customer portal** → click **Save** once (even without changing anything). This is the page clients use to update their card or cancel. SalesBoard fills in the right rules: cancel at the end of the period, no refunds.
+
+Where you see it in SalesBoard:
+- **Manager → 📑 Deals**: each client shows a tag: **🔁 auto-pay**, **⚠️ card declined**, **👋 cancels Nov 5** or **🛑 plan ended**. Open a deal for the next charge date, how much the plan has collected, and these buttons:
+  - **📋 Copy client billing link**: send it to a client whose card was declined.
+  - **🛑 Cancel auto-pay**: stops it at the end of the period. **↩️ Undo cancel** turns it back on.
+- The top of the Manager page shows a yellow box when a card is declined, and when a plan ends (so you remember to switch off their GoHighLevel account and AI receptionist, since those cost you money). Tap **✅ Done, it's off** after you do.
+- Managers get a phone buzz for a declined card, a cancellation, or a plan ending.
+- **Commission doesn't change:** reps get 10% of the setup fee once. Monthly charges and cancellations never add to it or take it back.
 
 ## ⚡ Part 7b: Instant pay for your reps (10 minutes)
 
@@ -361,4 +388,6 @@ SalesBoard gets better on its own the more your team calls.
 | Forgot your PIN / locked out | SSH window: `cd ~/sales-board && npm run admin -- reset-pin "Your Name" 1234 && sudo systemctl restart salesboard` |
 | Update SalesBoard later | SSH window: `cd ~/sales-board && git pull && npm ci --omit=dev && sudo systemctl restart salesboard` |
 | A rep's commission says "waiting" | The client's card payment is still clearing in Stripe (about 2 business days). It sends by itself. Keep a balance cushion (Part 7b) to skip the wait. |
+| A client wants to cancel | Send them their billing link (Manager → 📑 Deals → open the deal → **📋 Copy client billing link**) or press **🛑 Cancel auto-pay** for them. Their service runs until the end of the paid period. No refund. |
+| "Stripe billing page is not turned on yet" | Stripe → ⚙️ Settings → Billing → **Customer portal** → **Save** (Part 7a). |
 | Rep isn't getting notifications | On iPhone it only works from the Home Screen icon. Have them tap 🔔 Turn on again. |

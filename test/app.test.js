@@ -642,6 +642,14 @@ function fakeStripe({ insufficientTimes = 0, instantAvailable = 100000 } = {}) {
     if (u.includes('/v1/balance')) return ok({ instant_available: [{ currency: 'usd', amount: instantAvailable }] });
     if (u.endsWith('/v1/payouts')) return ok({ id: 'po_1' });
     if (u.includes('/v1/checkout/sessions')) return ok({ url: 'https://checkout.stripe.test/s' });
+    if (u.endsWith('/v1/billing_portal/configurations')) return ok({ id: 'bpc_1' });
+    if (u.endsWith('/v1/billing_portal/sessions')) return ok({ url: 'https://billing.stripe.test/p' });
+    if (u.includes('/v1/subscriptions/sub_1')) {
+      const b = opts.body ? new URLSearchParams(opts.body) : new URLSearchParams();
+      if (opts.method === 'DELETE') return ok({ id: 'sub_1', customer: 'cus_1', status: 'canceled', ended_at: 1800000000 });
+      const cancelling = b.get('cancel_at_period_end') === 'true';
+      return ok({ id: 'sub_1', customer: 'cus_1', status: 'active', cancel_at_period_end: cancelling, items: { data: [{ current_period_end: 1800000000 }] } });
+    }
     return ok({});
   };
   return { calls, fetchImpl };
@@ -716,7 +724,7 @@ test('checkout shows the no-refund policy and supports yearly billing', async ()
   const r = await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['missed_call_textback'], options: { billing: 'yearly' } } });
   await app.waitForProvisioning(r.body.deal.id);
   const co = st.calls.find((c) => c.url.includes('/v1/checkout/sessions'));
-  assert.strictEqual(co.body.get('custom_text[submit][message]'), 'All sales are final. No refunds.');
+  assert.match(co.body.get('custom_text[submit][message]'), /^Auto-pay: your card is charged \$1,670 every year automatically.* All sales are final\. No refunds\.$/);
   assert.strictEqual(co.body.get('line_items[1][price_data][recurring][interval]'), 'year');
   assert.strictEqual(co.body.get('line_items[1][price_data][unit_amount]'), String(167 * 10 * 100));
   assert.strictEqual(db.deals[0].billing, 'yearly');
@@ -997,3 +1005,114 @@ test('admin: owner is protected; managers add/edit/delete reps; deleting keeps h
   const log = (await call('GET', '/api/admin/audit', { token: manager })).body.entries;
   assert.ok(log.some((e) => /Deleted rep Maria G/.test(e.text)));
 });
+
+function stripeHook(call, secret, evt) {
+  const body = JSON.stringify(evt);
+  const t = Math.floor(Date.now() / 1000);
+  const sig = crypto.createHmac('sha256', secret).update(`${t}.${body}`).digest('hex');
+  return call('POST', '/api/hooks/stripe', { body, headers: { 'stripe-signature': `t=${t},v1=${sig}` } });
+}
+
+test('auto-pay: client is charged every month automatically and can cancel themselves', async () => {
+  const st = fakeStripe();
+  const secret = 'whsec_auto';
+  const { db, app, call } = setup({ STRIPE_SECRET_KEY: 'sk_test_x', STRIPE_WEBHOOK_SECRET: secret, PUBLIC_URL: 'https://sb.test' }, st.fetchImpl);
+  const { manager, rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Renew Roofing', phone: '7575550192', industry: 'roofer' } } })).body.lead;
+  const d = (await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['missed_call_textback'], contact: { name: 'Pat', email: 'pat@renew.test' } } })).body.deal;
+  await app.waitForProvisioning(d.id);
+  const deal = db.deals[0];
+
+  // Checkout is a subscription, and the pay page says it renews by itself.
+  const checkout = st.calls.find((c) => c.url.includes('/v1/checkout/sessions'));
+  assert.strictEqual(checkout.body.get('mode'), 'subscription');
+  assert.strictEqual(checkout.body.get('line_items[1][price_data][recurring][interval]'), 'month');
+  assert.match(checkout.body.get('custom_text[submit][message]'), /Auto-pay: your card is charged \$167 every month automatically/);
+  assert.match(checkout.body.get('custom_text[submit][message]'), /No refunds/);
+
+  // First payment: card saved, plan on.
+  await stripeHook(call, secret, { type: 'checkout.session.completed', data: { object: { metadata: { deal_id: deal.id }, customer: 'cus_1', subscription: 'sub_1' } } });
+  assert.strictEqual(deal.stripe.customerId, 'cus_1');
+  assert.strictEqual(deal.subscription.status, 'active');
+  assert.ok(deal.paidAt);
+  await stripeHook(call, secret, { type: 'invoice.paid', data: { object: { id: 'in_1', customer: 'cus_1', billing_reason: 'subscription_create', amount_paid: 61400, parent: { subscription_details: { subscription: 'sub_1', metadata: { deal_id: deal.id } } }, lines: { data: [{ period: { start: 1700000000, end: 1702592000 } }] } } } });
+  assert.strictEqual(deal.subscription.collected, 167); // setup fee not counted as plan revenue
+
+  // Next month Stripe charges on its own; we just record it (once, even if Stripe resends).
+  const renewal = { type: 'invoice.paid', data: { object: { id: 'in_2', subscription: 'sub_1', customer: 'cus_1', billing_reason: 'subscription_cycle', amount_paid: 16700, lines: { data: [{ period: { start: 1702592000, end: 1705270400 } }] } } } };
+  await stripeHook(call, secret, renewal);
+  await stripeHook(call, secret, renewal);
+  assert.strictEqual(deal.subscription.payments, 2);
+  assert.strictEqual(deal.subscription.collected, 334);
+  assert.strictEqual(deal.subscription.renewsAt, 1705270400000);
+  assert.strictEqual(deal.commission, 44.7); // commission is still only 10% of setup, once
+
+  // A declined card shows up for the manager, then clears when Stripe's retry works.
+  await stripeHook(call, secret, { type: 'invoice.payment_failed', data: { object: { id: 'in_3', subscription: 'sub_1', customer: 'cus_1', attempt_count: 1, next_payment_attempt: 1705500000 } } });
+  let ov = await call('GET', '/api/admin/overview', { token: manager });
+  assert.strictEqual(ov.body.billingAlerts[0].status, 'past_due');
+  await stripeHook(call, secret, { type: 'invoice.paid', data: { object: { id: 'in_3', subscription: 'sub_1', customer: 'cus_1', billing_reason: 'subscription_cycle', amount_paid: 16700, lines: { data: [] } } } });
+  assert.strictEqual(deal.subscription.status, 'active');
+  ov = await call('GET', '/api/admin/overview', { token: manager });
+  assert.strictEqual(ov.body.billingAlerts.length, 0);
+  assert.strictEqual(ov.body.totals.mrr, 167);
+  assert.strictEqual(ov.body.totals.autopayActive, 1);
+
+  // The client's own page shows auto-pay and a billing button that opens Stripe.
+  const page = await call('GET', `/api/onboard/${deal.onboardingToken}`);
+  assert.strictEqual(page.body.autopay.on, true);
+  assert.strictEqual(page.body.autopay.canManage, true);
+  assert.ok(!JSON.stringify(page.body).includes('cus_1'));
+  const portal = await call('POST', `/api/billing/${deal.onboardingToken}`);
+  assert.strictEqual(portal.body.url, 'https://billing.stripe.test/p');
+  const cfg = st.calls.find((c) => c.url.endsWith('/v1/billing_portal/configurations'));
+  assert.strictEqual(cfg.body.get('features[subscription_cancel][mode]'), 'at_period_end');
+  assert.strictEqual(cfg.body.get('features[subscription_cancel][proration_behavior]'), 'none');
+  const sess = st.calls.find((c) => c.url.endsWith('/v1/billing_portal/sessions'));
+  assert.strictEqual(sess.body.get('customer'), 'cus_1');
+  assert.strictEqual(sess.body.get('configuration'), 'bpc_1');
+  assert.strictEqual((await call('POST', '/api/billing/nope')).status, 404);
+
+  // Client cancels in Stripe: service runs to the end of the paid period, then stops.
+  await stripeHook(call, secret, { type: 'customer.subscription.updated', data: { object: { id: 'sub_1', customer: 'cus_1', status: 'active', cancel_at_period_end: true, cancel_at: 1705270400, items: { data: [{ current_period_end: 1705270400 }] } } } });
+  assert.strictEqual(deal.subscription.cancelAtPeriodEnd, true);
+  assert.strictEqual(deal.subscription.cancelAt, 1705270400000);
+  assert.strictEqual(billingMrr(deal), 167); // still paid through the period
+  await stripeHook(call, secret, { type: 'customer.subscription.deleted', data: { object: { id: 'sub_1', customer: 'cus_1', status: 'canceled', ended_at: 1705270400, cancellation_details: { feedback: 'too_expensive' } } } });
+  assert.strictEqual(deal.subscription.status, 'canceled');
+  assert.strictEqual(deal.subscription.reason, 'too_expensive');
+  assert.strictEqual(deal.commissionStatus, 'earned'); // rep keeps the commission
+  ov = await call('GET', '/api/admin/overview', { token: manager });
+  assert.strictEqual(ov.body.totals.mrr, 0);
+  assert.strictEqual(ov.body.billingAlerts[0].status, 'canceled'); // reminder to switch their account off
+  await call('POST', `/api/admin/deals/${d.id}/autopay/off-confirmed`, { token: manager });
+  ov = await call('GET', '/api/admin/overview', { token: manager });
+  assert.strictEqual(ov.body.billingAlerts.length, 0);
+});
+
+test('auto-pay: manager can cancel at period end (no refund) and undo it', async () => {
+  const st = fakeStripe();
+  const secret = 'whsec_auto2';
+  const { db, app, call } = setup({ STRIPE_SECRET_KEY: 'sk_test_x', STRIPE_WEBHOOK_SECRET: secret }, st.fetchImpl);
+  const { manager, rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Stop Co', phone: '7575550193', industry: 'hvac' } } })).body.lead;
+  const d = (await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['missed_call_textback'] } })).body.deal;
+  await app.waitForProvisioning(d.id);
+  await stripeHook(call, secret, { type: 'checkout.session.completed', data: { object: { metadata: { deal_id: d.id }, customer: 'cus_1', subscription: 'sub_1' } } });
+  // Reps can't touch billing.
+  assert.strictEqual((await call('POST', `/api/admin/deals/${d.id}/autopay/cancel`, { token: rep })).status, 403);
+  const r = await call('POST', `/api/admin/deals/${d.id}/autopay/cancel`, { token: manager });
+  assert.strictEqual(r.status, 200);
+  const upd = st.calls.filter((c) => c.url.endsWith('/v1/subscriptions/sub_1')).pop();
+  assert.strictEqual(upd.body.get('cancel_at_period_end'), 'true');
+  assert.strictEqual(upd.body.get('proration_behavior'), 'none');
+  assert.strictEqual(db.deals[0].subscription.cancelAtPeriodEnd, true);
+  await call('POST', `/api/admin/deals/${d.id}/autopay/resume`, { token: manager });
+  assert.strictEqual(db.deals[0].subscription.cancelAtPeriodEnd, false);
+  // Cancelling the whole deal ends auto-pay today.
+  await call('POST', `/api/admin/deals/${d.id}/cancel`, { token: manager });
+  assert.ok(st.calls.some((c) => c.method === 'DELETE' && c.url.endsWith('/v1/subscriptions/sub_1')));
+  assert.strictEqual(db.deals[0].subscription.status, 'canceled');
+});
+
+const billingMrr = (deal) => require('../src/billing').mrrOf(deal);

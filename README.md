@@ -9,6 +9,7 @@ A fun, competitive sales dashboard built so anyone can use it. Your team uses it
 - 💰 **Commission**: reps get **10% of the setup fee, paid once**, on every deal they close. There's no commission on monthly fees. It's tracked as *pending → earned (client paid) → paid out*.
 - ⚡ **Reps get paid fast**: link a debit card once (a Cash App Card works if Stripe accepts it) and commission lands within minutes of the client paying, via Stripe Connect Instant Payouts. Or save a $cashtag and the manager pays in one tap.
 - 📧 **Email drip**: any lead who gives an email gets automatic follow-ups through Brevo/Resend free tiers.
+- 🔁 **Client auto-pay**: after the first payment, Stripe charges the client's card every month (or year) automatically. Clients only act to cancel, from their own billing page (update card, receipts, cancel). Cancelling stops the next charge with no refund. Managers see declined cards, cancellations and ended plans, with one-tap cancel/undo.
 - 🏷️ **Priced under market, never at a loss**: researched prices, with live profit math for the manager. Yearly prepay option (2 months free). All sales final: the no-refund policy is shown before every payment.
 - ✨ **AI openers** *(optional)*: Claude writes a personal first line for each call from the business's Google reviews.
 - 🔔 **Phone notifications**: installable app with a buzz when a callback is due or a commission is paid.
@@ -108,7 +109,7 @@ Step-by-step instructions for every free tier are in **[docs/SETUP-GUIDE.md](doc
 - **AI openers** *(optional)*: `ANTHROPIC_API_KEY`.
 - **Backups**: nightly copies in `data/backups/` (14 kept). Set `BACKUP_BUCKET` for an off-server copy in Google Cloud Storage.
 - **Email drip**: `BREVO_API_KEY` (or `RESEND_API_KEY`), then set the sender email and mailing address in **Manager → 📧 Email Drip**.
-- **Stripe**: `STRIPE_SECRET_KEY` creates a Checkout link (setup fee + monthly plan) on every close. With `STRIPE_WEBHOOK_SECRET` (endpoint `<PUBLIC_URL>/api/hooks/stripe`, event `checkout.session.completed`), deals are marked paid automatically and commission becomes *earned*. Without Stripe, the manager clicks **Mark client paid**.
+- **Stripe**: `STRIPE_SECRET_KEY` creates a Checkout link (setup fee + monthly plan) on every close. With `STRIPE_WEBHOOK_SECRET` (endpoint `<PUBLIC_URL>/api/hooks/stripe`, events `checkout.session.completed`, `invoice.paid`, `invoice.payment_failed`, `customer.subscription.updated`, `customer.subscription.deleted`), deals are marked paid automatically, commission becomes *earned*, and each client's auto-pay status (renewals, declines, cancellations) stays in sync. Clients manage their plan at `<PUBLIC_URL>/billing/<token>` (Stripe customer portal, cancel at period end, no prorations). Without Stripe, the manager clicks **Mark client paid**.
 
 ### Automatic provisioning (Zapier / Make / n8n / GoHighLevel)
 Paste a webhook URL in **Manager → Settings** (or set `SETUP_WEBHOOK_URL`). SalesBoard POSTs JSON for these events:
@@ -167,6 +168,7 @@ src/provision.js   one-button setup engine: Stripe → GoHighLevel sub-account +
 src/drip.js        email drip sequences + Brevo/Resend sending + unsubscribe
 src/pricing.js     profit math (setup commission is one-time, 10%)
 src/payouts.js     rep payouts: Stripe Connect instant payouts + Cash App links
+src/billing.js     client auto-pay: Stripe subscription sync, billing portal, cancel/undo
 src/push.js        Web Push notifications (VAPID + RFC 8291 encryption, no packages)
 src/backup.js      nightly backups (+ Google Cloud Storage upload)
 src/ai.js          AI-written openers (Anthropic SDK)

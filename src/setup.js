@@ -102,8 +102,15 @@ async function createStripeCheckout({ deal, secretKey, publicUrl, policy, fetchI
   if (deal.contact.email) p.set('customer_email', deal.contact.email);
   const onboard = `${publicUrl}/onboard/${deal.onboardingToken}`;
   p.set('success_url', `${onboard}?paid=1`);
-  // Shown right above the Pay button so the policy is clear before they buy.
-  if (policy) p.set('custom_text[submit][message]', policy.slice(0, 1000));
+  // Shown right above the Pay button so auto-renew and the policy are clear before they buy.
+  const terms = [];
+  if (recurring) {
+    const yearly = deal.billing === 'yearly';
+    const plan = yearly ? deal.yearlyTotal : deal.monthlyTotal;
+    terms.push(`Auto-pay: your card is charged $${plan.toLocaleString('en-US')} every ${yearly ? 'year' : 'month'} automatically, so you never have to pay by hand. Cancel anytime from your billing link; cancelling stops the next charge.`);
+  }
+  if (policy) terms.push(policy);
+  if (terms.length) p.set('custom_text[submit][message]', terms.join(' ').slice(0, 1000));
   p.set('cancel_url', onboard);
   let i = 0;
   const names = deal.workflows.map((w) => w.name).join(', ');

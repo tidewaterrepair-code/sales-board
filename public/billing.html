@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Manage Billing</title>
+  <style>
+    :root { --bg: #f5f7fb; --card: #fff; --text: #14183a; --muted: #5f6787; --line: #e1e5f0; --brand: #3a72e6; color-scheme: light; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0b1026; --card: #18214a; --text: #eef1ff; --muted: #9aa6d6; --line: #2b3770; color-scheme: dark; } }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+    main { max-width: 480px; margin: 0 auto; padding: 3rem 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 1.5rem; text-align: center; }
+    h1 { font-size: 1.4rem; margin: .5rem 0; }
+    .muted { color: var(--muted); }
+    button { font: inherit; font-weight: 700; padding: .9rem 1.4rem; border-radius: 12px; border: 0; background: var(--brand); color: #fff; cursor: pointer; width: 100%; margin-top: 1rem; }
+    .big { font-size: 3rem; }
+    .err { color: #d6334f; font-weight: 700; }
+  </style>
+</head>
+<body>
+  <main><div class="card" id="root"><div class="big">💳</div><h1>Opening your billing page…</h1><p class="muted">One moment. You'll be taken to our secure payment partner, Stripe.</p></div></main>
+  <script>
+  (function () {
+    const root = document.getElementById('root');
+    const token = location.pathname.split('/').filter(Boolean)[1];
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    function open() {
+      fetch(`/api/billing/${encodeURIComponent(token)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+        .then((r) => r.json().then((d) => ({ ok: r.ok, d })))
+        .then(({ ok, d }) => {
+          if (ok && d.url) { location.href = d.url; return; }
+          root.innerHTML = `<div class="big">🔗</div><h1>Can't open billing</h1><p class="err">${esc(d.error || 'Something went wrong.')}</p><button id="again">Try again</button>`;
+          document.getElementById('again').addEventListener('click', open);
+        })
+        .catch(() => { root.innerHTML = '<h1>Connection problem</h1><p class="muted">Please refresh the page.</p>'; });
+    }
+    open();
+  })();
+  </script>
+</body>
+</html>

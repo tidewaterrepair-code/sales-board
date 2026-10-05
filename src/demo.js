@@ -59,6 +59,16 @@ function seedDemo(db, catalog, settings, now = Date.now()) {
         deal.provisioning = { status: 'done', steps: [{ key: 'deal', label: 'Deal saved + your commission locked in', status: 'done', detail: 'Demo deal' }], startedAt: createdAt, finishedAt: createdAt };
         if (day > 2 && rand() < 0.8) { deal.status = 'paid'; deal.commissionStatus = 'earned'; deal.paidAt = createdAt + 86400000; }
         if (day > 8 && rand() < 0.5) { deal.commissionStatus = 'paid_out'; deal.status = 'live'; deal.workflows.forEach((w) => { w.status = 'live'; w.tasks.forEach((t) => { t.done = true; }); }); }
+        if (deal.paidAt && deal.monthlyTotal) {
+          const r = rand();
+          deal.subscription = {
+            status: r < 0.08 ? 'past_due' : 'active', interval: 'month', amount: deal.monthlyTotal,
+            payments: 1, collected: deal.monthlyTotal, failures: r < 0.08 ? 1 : 0,
+            lastPaidAt: deal.paidAt, renewsAt: deal.paidAt + 30 * 86400000,
+            cancelAtPeriodEnd: r > 0.94, cancelAt: r > 0.94 ? deal.paidAt + 30 * 86400000 : null,
+          };
+          if (r < 0.08) deal.subscription.nextRetryAt = createdAt + 3 * 86400000;
+        }
         db.deals.push(deal);
         db.events.push({ id: id('evt'), userId: rep.id, type: 'deal', points: deal.points, dealId: deal.id, leadId: lead.id, label: `closed ${wfs.map((w) => w.name).join(' + ')} for ${lead.name}`, createdAt, demo: true });
       }

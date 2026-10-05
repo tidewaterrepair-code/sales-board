@@ -1189,12 +1189,13 @@
         <h1>🛠️ Manager</h1>
         <div class="grid four">
           <div class="card"><div class="label">Setup fees sold</div><div class="stat">${money(d.totals.setupSold)}</div></div>
-          <div class="card"><div class="label">Monthly recurring</div><div class="stat green">${money(d.totals.mrr)}</div></div>
+          <div class="card"><div class="label">Monthly recurring</div><div class="stat green">${money(d.totals.mrr)}</div><div class="tiny muted">🔁 ${d.totals.autopayActive || 0} on auto-pay · ${money(d.totals.recurringCollected || 0)} collected</div></div>
           <div class="card"><div class="label">Commission owed now</div><div class="stat gold">${money(d.totals.commissionOwed)}</div><div class="tiny muted">+ ${money(d.totals.commissionPending)} pending payment</div></div>
           <div class="card"><div class="label">Deals</div><div class="stat">${d.totals.deals}</div></div>
         </div>
         <div class="tabs">${[['launch', '🚀 Launch'], ['deals', '📑 Deals'], ['team', '👥 Team & Payouts'], ['pricing', '🏷️ Pricing & Profit'], ['drip', '📧 Email Drip'], ['experiments', '🧪 A/B Tests'], ['insights', '📈 Insights'], ['settings', '⚙️ Settings']].map(([k, l]) => `<button class="tab ${t === k ? 'on' : ''}" data-act="admin-tab" data-k="${k}">${l}</button>`).join('')}</div>
         ${(d.alerts || []).length ? `<div class="card" style="border-color:var(--warm)">⚠️ <b>AI receptionist minutes:</b> ${d.alerts.map((a) => `${esc(a.business)} used ${a.minutes} of ${a.included} min`).join(' · ')}. Offer them a bigger plan before you pay for extra minutes.</div>` : ''}
+        ${billingAlertsHtml(d.billingAlerts)}
         <div>${t === 'launch' ? adminLaunch(d) : t === 'deals' ? adminDeals(d) : t === 'team' ? adminTeam(d) : t === 'pricing' ? adminPricing(d) : t === 'drip' ? adminDrip(S.admin.drips) : t === 'insights' ? adminInsights(S.admin.insights) : t === 'experiments' ? adminExperiments(S.admin.experiments, d) : adminSettings(d)}</div>
       </div>`;
   }
@@ -1325,7 +1326,7 @@
       const open = S.admin.open === x.id;
       return `<div class="card ${x.status === 'cancelled' ? '' : x.status === 'live' ? 'win' : ''}">
         <div class="row between" data-act="admin-open" data-id="${esc(x.id)}" style="cursor:pointer">
-          <div><b>${esc(x.business.name)}</b> <span class="status ${x.status}">${dealStatusLabel(x.status)}</span>${x.onboarding ? ' <span class="tag good">📝 form done</span>' : ''}
+          <div><b>${esc(x.business.name)}</b> <span class="status ${x.status}">${dealStatusLabel(x.status)}</span>${x.onboarding ? ' <span class="tag good">📝 form done</span>' : ''}${autopayTag(x)}
             <div class="small muted">${new Date(x.createdAt).toLocaleString()} · by ${esc(x.repName)} · ${x.workflows.map((w) => w.emoji).join(' ')}</div></div>
           <div class="center"><b>${money(x.setupTotal)}</b> <span class="small muted">+ ${money(x.monthlyTotal)}/mo</span><div class="small" style="color:var(--green)">commission ${money(x.commission)} · <span class="status ${x.commissionStatus}">${x.commissionStatus.replace('_', ' ')}</span></div></div>
         </div>
@@ -1340,6 +1341,7 @@
                 ${x.ghl?.locationId ? `<div class="small">🏢 GoHighLevel sub-account: <code>${esc(x.ghl.locationId)}</code></div>` : ''}
                 ${x.provisioning?.onboardingSync ? `<div class="tiny muted">📝 Setup form synced: ${x.provisioning.onboardingSync.results.map(esc).join(' · ') || 'nothing to sync yet'}</div>` : ''}
               </div>
+              ${autopayPanel(x)}
               <div class="copybox"><input class="input" readonly value="${esc(x.onboardingUrl)}"><button class="btn sm" data-act="copy" data-text="${esc(x.onboardingUrl)}">📋</button></div>
               ${x.paymentUrl ? `<a class="small" href="${esc(x.paymentUrl)}" target="_blank" rel="noopener">💳 Payment link</a>` : ''}
               ${x.onboarding ? `<div><div class="label">Client onboarding answers</div><div class="small">${Object.entries(x.onboarding.answers).map(([k, v]) => `<div><b>${esc(k.replace(/_/g, ' '))}:</b> ${esc(v)}</div>`).join('')}</div></div>` : ''}
@@ -1363,6 +1365,43 @@
           </div>` : ''}
       </div>`;
     }).join('')}</div>`;
+  }
+
+  // ---- Client auto-pay (Stripe charges them every month on its own) ----
+  const shortDay = (ts) => new Date(ts).toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  function autopayTag(x) {
+    const s = x.subscription;
+    if (!x.monthlyTotal || !s) return '';
+    if (s.status === 'canceled') return ' <span class="tag">🛑 plan ended</span>';
+    if (s.cancelAtPeriodEnd) return ` <span class="tag warm">👋 cancels ${s.cancelAt ? shortDay(s.cancelAt) : ''}</span>`;
+    if (s.status === 'past_due' || s.status === 'unpaid') return ' <span class="tag hot">⚠️ card declined</span>';
+    return ' <span class="tag good">🔁 auto-pay</span>';
+  }
+  function autopayPanel(x) {
+    if (!x.monthlyTotal) return '';
+    const s = x.subscription;
+    const link = x.onboardingUrl.replace('/onboard/', '/billing/');
+    const every = x.billing === 'yearly' ? `${money(x.yearlyTotal)}/year` : `${money(x.monthlyTotal)}/month`;
+    if (!s) return `<div><div class="label">🔁 Auto-pay</div><div class="small muted">${x.paidAt ? 'Paid outside Stripe, so there\'s no auto-pay. Send them a Stripe payment link next time.' : `Starts when they pay: ${every}, charged automatically.`}</div></div>`;
+    let line;
+    if (s.status === 'canceled') line = `🛑 Plan ended${s.endedAt ? ` ${shortDay(s.endedAt)}` : ''}. No more charges.${s.reason ? ` Reason: ${esc(String(s.reason).replace(/_/g, ' '))}.` : ''}`;
+    else if (s.cancelAtPeriodEnd) line = `👋 Cancelled. Service runs until ${s.cancelAt ? shortDay(s.cancelAt) : 'the end of this period'}, then charges stop. No refund.`;
+    else if (s.status === 'past_due' || s.status === 'unpaid') line = `⚠️ Card declined${s.failures > 1 ? ` ${s.failures} times` : ''}.${s.nextRetryAt ? ` Stripe tries again ${shortDay(s.nextRetryAt)}.` : ''} Send them the billing link to update their card.`;
+    else line = `✅ On: ${every}${s.renewsAt ? `, next charge ${shortDay(s.renewsAt)}` : ''}.`;
+    return `<div><div class="label">🔁 Auto-pay</div>
+      <div class="small">${line}</div>
+      <div class="tiny muted">${s.payments || 0} payment${s.payments === 1 ? '' : 's'} · ${money(s.collected || 0)} collected from the plan</div>
+      <div class="row" style="margin-top:.4rem">
+        <button class="btn sm" data-act="copy" data-text="${esc(link)}">📋 Copy client billing link</button>
+        ${s.status !== 'canceled' && !s.cancelAtPeriodEnd ? `<button class="btn sm danger" data-act="autopay-cancel" data-id="${esc(x.id)}" data-name="${esc(x.business.name)}">🛑 Cancel auto-pay</button>` : ''}
+        ${s.cancelAtPeriodEnd && s.status !== 'canceled' ? `<button class="btn sm go" data-act="autopay-resume" data-id="${esc(x.id)}">↩️ Undo cancel</button>` : ''}
+      </div></div>`;
+  }
+  function billingAlertsHtml(list) {
+    if (!list || !list.length) return '';
+    return list.map((a) => a.status === 'canceled'
+      ? `<div class="card" style="border-color:var(--warm)">🛑 <b>${esc(a.business)}</b>'s plan ended. Turn off their GoHighLevel account and AI receptionist so you stop paying for them. <button class="btn sm" data-act="autopay-off" data-id="${esc(a.dealId)}">✅ Done, it's off</button></div>`
+      : `<div class="card" style="border-color:var(--warm)">⚠️ <b>${esc(a.business)}</b>: auto-payment declined${a.failures > 1 ? ` ${a.failures} times` : ''}.${a.nextRetryAt ? ` Stripe retries ${shortDay(a.nextRetryAt)}.` : ''} Open the deal and send them their billing link.</div>`).join('');
   }
 
   function adminTeam(d) {
@@ -1614,7 +1653,13 @@
     'deal-paid': (el) => adminAction(`/api/admin/deals/${el.dataset.id}/paid`, '💵 Marked paid. Rep\'s commission is now earned.'),
     'deal-payout': (el) => adminAction(`/api/admin/deals/${el.dataset.id}/payout`, '💸 Commission marked as paid out.'),
     'deal-retry': (el) => { el.disabled = true; el.textContent = '⏳ Retrying…'; adminAction(`/api/admin/deals/${el.dataset.id}/retry`, '🔁 Setup re-run. Check the steps.'); },
-    'deal-cancel': (el) => { if (confirm('Cancel this deal? Points and commission will be removed from the rep.')) adminAction(`/api/admin/deals/${el.dataset.id}/cancel`, 'Deal cancelled.'); },
+    'deal-cancel': (el) => { if (confirm('Cancel this deal? Points and commission will be removed from the rep, and any auto-pay plan ends today (no refund).')) adminAction(`/api/admin/deals/${el.dataset.id}/cancel`, 'Deal cancelled.'); },
+    'autopay-cancel': (el) => {
+      if (!confirm(`Cancel ${el.dataset.name}'s auto-pay?\n\nThey keep service until the end of the period they already paid for, then charges stop. No refund.`)) return;
+      adminAction(`/api/admin/deals/${el.dataset.id}/autopay/cancel`, '👋 Auto-pay cancelled. It stops at the end of this period.');
+    },
+    'autopay-resume': (el) => adminAction(`/api/admin/deals/${el.dataset.id}/autopay/resume`, '🔁 Auto-pay is back on.'),
+    'autopay-off': (el) => adminAction(`/api/admin/deals/${el.dataset.id}/autopay/off-confirmed`, '✅ Got it.'),
     task: (el) => adminAction(`/api/admin/deals/${el.dataset.deal}/workflow/${el.dataset.wf}`, null, { taskIndex: Number(el.dataset.i), done: el.checked }),
     'wf-live': (el) => adminAction(`/api/admin/deals/${el.dataset.deal}/workflow/${el.dataset.wf}`, '✅ Workflow is live!', { status: 'live' }),
     'rep-payout': (el) => { if (confirm(`Confirm you've paid ${el.dataset.name} ${money(el.dataset.amt)}?`)) adminAction(`/api/admin/reps/${el.dataset.id}/payout`, `💸 ${esc(el.dataset.name)}'s payout recorded.`, { method: S.admin.cashappOpened === el.dataset.id ? 'cashapp' : 'manual' }); },

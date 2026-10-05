@@ -20,6 +20,7 @@ const push = require('./push');
 const backup = require('./backup');
 const experiments = require('./experiments');
 const learn = require('./learn');
+const billing = require('./billing');
 const { AI_ADDON, TASK_OWNERS } = require('./workflows');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
@@ -262,6 +263,8 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   // ---- Phone notifications ----
   const pushSubject = () => (/^https:\/\//.test(publicUrl()) ? publicUrl() : `mailto:${settings().fromEmail || 'admin@example.com'}`);
   const notify = (user, payload) => push.notifyUser({ db, user, payload, subject: pushSubject(), fetchImpl }).catch((err) => console.error('[push]', err.message));
+  const notifyManagers = (payload) => Promise.all(db.users.filter((u) => u.role === 'manager' && u.active !== false && u.pushSubs?.length).map((u) => notify(u, payload)));
+  const billCtx = () => ({ env, fetchImpl, publicUrl: publicUrl(), companyName: settings().companyName });
   async function runReminders() {
     let n = 0;
     for (const lead of db.leads) {
@@ -365,8 +368,35 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       refundPolicy: settings().refundPolicy,
       billing: deal.billing || 'monthly',
       yearlyTotal: deal.yearlyTotal || 0,
+      autopay: autopayInfo(deal),
       fields,
     };
+  }, { public: true });
+
+  // What the client sees about their auto-pay plan (never Stripe IDs).
+  function autopayInfo(deal) {
+    if (!deal.monthlyTotal) return null;
+    const s = deal.subscription;
+    return {
+      on: Boolean(s) && s.status !== 'canceled',
+      status: s?.status || (deal.paidAt ? 'active' : 'not_started'),
+      renewsAt: s?.renewsAt || null,
+      cancelAt: s?.cancelAtPeriodEnd ? s.cancelAt : null,
+      canManage: Boolean(deal.stripe?.customerId),
+    };
+  }
+
+  // Client's "Manage billing" button: opens Stripe's page to update the card,
+  // see receipts, or cancel. Works even after the plan is cancelled.
+  route('POST', '/api/billing/:token', async ({ params }) => {
+    const deal = db.deals.find((d) => d.onboardingToken === params.token);
+    if (!deal) throw new HttpError(404, 'This billing link is not valid. Please contact us.');
+    if (!env.STRIPE_SECRET_KEY) throw new HttpError(400, 'Online billing is not set up yet. Please contact us.');
+    try {
+      return { url: await billing.portalLink(billCtx(), db, deal) };
+    } catch (err) {
+      throw new HttpError(400, err.message);
+    }
   }, { public: true });
 
   route('POST', '/api/onboard/:token', async ({ params, body }) => {
@@ -397,10 +427,38 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     if (!env.STRIPE_WEBHOOK_SECRET) throw new HttpError(400, 'Stripe webhook secret not configured');
     if (!setup.verifyStripeSignature(raw, headers['stripe-signature'], env.STRIPE_WEBHOOK_SECRET, 300, now())) throw new HttpError(400, 'Bad signature');
     const evt = JSON.parse(raw);
+    const obj = evt.data?.object || {};
     if (evt.type === 'checkout.session.completed') {
-      const dealId = evt.data?.object?.metadata?.deal_id || evt.data?.object?.client_reference_id;
-      const deal = db.deals.find((d) => d.id === dealId);
-      if (deal) await markPaid(deal);
+      const deal = db.deals.find((d) => d.id === (obj.metadata?.deal_id || obj.client_reference_id));
+      if (deal) {
+        billing.applyCheckout(deal, obj);
+        await markPaid(deal);
+        db.save();
+      }
+    } else if (evt.type === 'invoice.paid' || evt.type === 'invoice.payment_succeeded') {
+      const deal = billing.findDeal(db, { dealId: billing.dealIdOfInvoice(obj), subscriptionId: billing.subIdOfInvoice(obj), customerId: obj.customer });
+      if (deal) {
+        const { recovered } = billing.applyInvoicePaid(deal, obj, now());
+        db.save();
+        if (recovered) notifyManagers({ title: '✅ Payment recovered', body: `${deal.business.name}'s card went through. Auto-pay is back on track.`, url: '/#/admin/deals' });
+      }
+    } else if (evt.type === 'invoice.payment_failed') {
+      const deal = billing.findDeal(db, { dealId: billing.dealIdOfInvoice(obj), subscriptionId: billing.subIdOfInvoice(obj), customerId: obj.customer });
+      if (deal) {
+        const { firstFailure } = billing.applyInvoiceFailed(deal, obj, now());
+        db.save();
+        if (firstFailure) notifyManagers({ title: '⚠️ Card declined', body: `${deal.business.name}'s auto-payment failed. Stripe will retry; send them their billing link to update the card.`, url: '/#/admin/deals' });
+      }
+    } else if (evt.type === 'customer.subscription.updated' || evt.type === 'customer.subscription.deleted' || evt.type === 'customer.subscription.created') {
+      const deal = billing.findDeal(db, { dealId: obj.metadata?.deal_id, subscriptionId: obj.id, customerId: obj.customer });
+      if (deal) {
+        const before = { status: deal.subscription?.status, cancelAtPeriodEnd: deal.subscription?.cancelAtPeriodEnd };
+        billing.applySubscription(deal, obj);
+        const s = deal.subscription;
+        db.save();
+        if (s.status === 'canceled' && before.status !== 'canceled') notifyManagers({ title: '🛑 Plan ended', body: `${deal.business.name}'s plan has ended. Turn off their account and AI receptionist.`, url: '/#/admin/deals' });
+        else if (s.cancelAtPeriodEnd && !before.cancelAtPeriodEnd) notifyManagers({ title: '👋 Client cancelled', body: `${deal.business.name} cancelled. Service runs until ${new Date(s.cancelAt || now()).toLocaleDateString('en-US')}, then auto-pay stops.`, url: '/#/admin/deals' });
+      }
     }
     return { received: true };
   }, { public: true });
@@ -826,13 +884,16 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       workflows: catalog().map((w) => ({ id: w.id, name: w.name, emoji: w.emoji, setupFee: w.setupFee, monthlyFee: w.monthlyFee, market: w.market, cost: w.cost, enabled: w.enabled, profit: profitFor(w, settings().commissionRate) })),
       totals: {
         setupSold: live.reduce((s, d) => s + d.setupTotal, 0),
-        mrr: live.reduce((s, d) => s + d.monthlyTotal, 0),
+        mrr: game.round2(db.deals.reduce((s, d) => s + billing.mrrOf(d), 0)),
+        recurringCollected: game.round2(db.deals.reduce((s, d) => s + (d.subscription?.collected || 0), 0)),
+        autopayActive: db.deals.filter((d) => d.subscription && ['active', 'trialing', 'past_due'].includes(d.subscription.status)).length,
         commissionOwed: game.round2(Object.values(owed).reduce((s, v) => s + v, 0)),
         commissionPending: game.round2(live.filter((d) => d.commissionStatus === 'pending').reduce((s, d) => s + d.commission, 0)),
         deals: live.length,
       },
       owed,
       alerts: db.deals.filter((d) => d.status !== 'cancelled' && d.aiUsage?.month === monthKey() && d.aiUsage.alerted).map((d) => ({ dealId: d.id, business: d.business.name, minutes: Math.round(d.aiUsage.seconds / 60), included: Number(settings().aiMinutesIncluded) || 600 })),
+      billingAlerts: db.deals.filter((d) => d.subscription && (d.subscription.status === 'past_due' || d.subscription.status === 'unpaid' || (d.subscription.status === 'canceled' && !d.subscription.offConfirmed))).map((d) => ({ dealId: d.id, business: d.business.name, status: d.subscription.status, failures: d.subscription.failures || 0, nextRetryAt: d.subscription.nextRetryAt || null, endedAt: d.subscription.endedAt || null })),
     };
   }, { admin: true });
 
@@ -950,9 +1011,12 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     return { result: r, deal: dealOut(d) };
   }, { admin: true });
 
-  route('POST', '/api/admin/deals/:id/cancel', ({ params }) => {
+  route('POST', '/api/admin/deals/:id/cancel', async ({ params }) => {
     const d = dealById(params.id);
     if (d.commissionStatus === 'paid_out') throw new HttpError(400, 'Commission was already paid out on this deal. Sort it out with the rep before cancelling.');
+    if (d.stripe?.subscriptionId && env.STRIPE_SECRET_KEY && d.subscription?.status !== 'canceled') {
+      try { await billing.cancel(billCtx(), d, { immediately: true }); } catch (err) { throw new HttpError(400, `Couldn't stop their auto-pay in Stripe: ${err.message}`); }
+    }
     d.status = 'cancelled';
     d.commissionStatus = 'cancelled';
     drip.stopFor(db, (x) => x.dealId === d.id, 'Deal cancelled');
@@ -961,6 +1025,34 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     if (lead) { lead.status = 'interested'; lead.history.push({ at: now(), by: 'Manager', text: 'Deal cancelled' }); }
     db.save();
     return { deal: setup.publicDeal(d) };
+  }, { admin: true });
+
+  // Auto-pay controls. Cancelling never refunds: it stops the next charge.
+  route('POST', '/api/admin/deals/:id/autopay/:action', async ({ params, body, user }) => {
+    const d = dealById(params.id);
+    if (params.action === 'off-confirmed') {
+      if (!d.subscription) throw new HttpError(400, 'No auto-pay plan on this deal.');
+      d.subscription.offConfirmed = true;
+      audit(user, `Confirmed service turned off for ${d.business.name}`);
+      db.save();
+      return { deal: dealOut(d) };
+    }
+    if (params.action === 'link') {
+      if (!env.STRIPE_SECRET_KEY) throw new HttpError(400, 'Connect Stripe first.');
+      return { url: `${publicUrl()}/billing/${d.onboardingToken}` };
+    }
+    if (!env.STRIPE_SECRET_KEY) throw new HttpError(400, 'Connect Stripe first.');
+    try {
+      if (params.action === 'cancel') await billing.cancel(billCtx(), d, { immediately: body.immediately === true });
+      else if (params.action === 'resume') await billing.resume(billCtx(), d);
+      else throw new HttpError(404, 'Unknown action.');
+    } catch (err) {
+      if (err instanceof HttpError) throw err;
+      throw new HttpError(400, err.message);
+    }
+    audit(user, `${params.action === 'resume' ? 'Turned auto-pay back on' : body.immediately ? 'Ended auto-pay today' : 'Cancelled auto-pay at period end'} for ${d.business.name}`);
+    db.save();
+    return { deal: dealOut(d) };
   }, { admin: true });
 
   route('POST', '/api/admin/deals/:id/workflow/:wid', ({ params, body }) => {
@@ -1321,6 +1413,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     let file = pathname === '/' ? '/index.html' : pathname;
     if (/^\/onboard\/[a-f0-9]+\/?$/.test(pathname)) file = '/onboard.html';
     if (/^\/unsubscribe\/[a-z0-9]+\/?$/.test(pathname)) file = '/unsubscribe.html';
+    if (/^\/billing\/[a-f0-9]+\/?$/.test(pathname)) file = '/billing.html';
     const full = path.normalize(path.join(PUBLIC_DIR, file));
     if (!full.startsWith(PUBLIC_DIR + path.sep)) return send(res, 403, { error: 'Forbidden' });
     fs.readFile(full, (err, data) => {
