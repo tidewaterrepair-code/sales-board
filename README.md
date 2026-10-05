@@ -6,20 +6,27 @@ A fun, competitive sales dashboard built so anyone can use it. Your team uses it
 - 📞 **Call mode**: a personalized teleprompter script (Open → Hook → Ask → Pitch → Close), one-tap objection answers and a live ROI calculator.
 - 🎉 **One-button setup**: when the lead says yes, the rep hits **THEY SAID YES** → **SET IT ALL UP**. That one button creates the deal, the Stripe payment link, the client onboarding form and the fulfillment checklist, and fires your automation webhook.
 - 🏆 **Leaderboard**: points, levels (Rookie → Legend), badges, streaks, a weekly contest, a live "who just closed" ticker with sound and confetti.
-- 💰 **Commission**: reps automatically get **10% of the setup fee** on every deal they close (the rate can be changed). It's tracked as *pending → earned (client paid) → paid out*.
+- 💰 **Commission**: reps get **10% of the setup fee, paid once**, on every deal they close. There's no commission on monthly fees. It's tracked as *pending → earned (client paid) → paid out*.
+- 📧 **Email drip**: any lead who gives an email gets automatic follow-ups through Brevo/Resend free tiers.
+- 🏷️ **Priced under market, never at a loss**: researched prices, with live profit math for the manager.
 
 Zero dependencies. Only Node.js 20+ is needed.
 
 ---
 
-## 🚀 Start it (2 minutes)
+## 🚀 Install (one command)
 
 ```bash
-cp .env.example .env     # optional: add keys later
-npm start                # → http://localhost:3000
+bash install.sh              # Mac / Linux: installs Node if needed, asks for keys, starts the app
+bash install.sh --service    # Linux server: also keeps it running 24/7
+docker compose up -d         # or run it with Docker
 ```
+Windows: `powershell -ExecutionPolicy Bypass -File install.ps1`
 
-1. Open the app and create your **manager** account (name + PIN).
+The app opens at **http://localhost:3000**. Press Enter to skip any key, and add them later with `npm run setup`.
+👉 **[docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md)** walks through every free tier (hosting, Google, Brevo, Stripe, Make) step by step.
+
+1. Create your **manager** account (name + PIN).
 2. **Manager → Team & Payouts**: add each sales rep with a PIN.
    Or **Manager → Settings → Load demo team** to see it full of data (demo PIN `1234`).
 3. Reps open the app on their phone or computer, tap their name, type their PIN and start selling.
@@ -28,24 +35,39 @@ Without a Google key the app runs in **practice mode** with realistic fake busin
 
 ---
 
-## 🧰 The Top 10 Workflows
+## 🧰 The Top 10 Workflows (priced under market)
 
-| # | Workflow | AI? | Setup | Monthly | Rep earns |
-|---|----------|-----|------:|--------:|----------:|
-| 1 | 📲 Missed-Call Text-Back | No AI needed (AI add-on) | $497 | $97 | $49.70 |
-| 2 | ⭐ 5-Star Review Engine | No AI needed (AI add-on) | $597 | $97 | $59.70 |
-| 3 | 🤖 24/7 AI Receptionist | AI | $997 | $297 | $99.70 |
-| 4 | ⚡ Instant Lead Responder | No AI needed (AI add-on) | $697 | $147 | $69.70 |
-| 5 | 📅 Online Booking + No-Show Killer | No AI | $597 | $97 | $59.70 |
-| 6 | 💸 Dead Lead Reactivation Blast | AI | $797 | $97 | $79.70 |
-| 7 | 💳 Text-to-Pay & Invoice Chaser | No AI | $497 | $77 | $49.70 |
-| 8 | 📣 Social + Google Posts Autopilot | AI | $697 | $197 | $69.70 |
-| 9 | 📝 Estimate Follow-Up Closer | No AI needed (AI add-on) | $597 | $97 | $59.70 |
-| 10 | 🔁 Referral & Rebooking Engine | No AI | $497 | $97 | $49.70 |
+Prices are researched and sit **10–25% under what agencies typically charge**, while staying profitable after the rep's commission. Sources and full math: **[docs/PRICING-RESEARCH.md](docs/PRICING-RESEARCH.md)**.
+
+| # | Workflow | AI? | Market | **Our price** | Rep earns (once) |
+|---|----------|-----|-------:|------:|----------:|
+| 1 | 📲 Missed-Call Text-Back | No AI needed (AI add-on) | $497 + $197/mo | **$447 + $167/mo** | $44.70 |
+| 2 | ⭐ 5-Star Review Engine | No AI needed (AI add-on) | $397 + $199/mo | **$347 + $167/mo** | $34.70 |
+| 3 | 🤖 24/7 AI Receptionist | AI | $497 + $297/mo | **$447 + $257/mo** | $44.70 |
+| 4 | ⚡ Instant Lead Responder | No AI needed (AI add-on) | $597 + $197/mo | **$497 + $167/mo** | $49.70 |
+| 5 | 📅 Online Booking + No-Show Killer | No AI | $397 + $129/mo | **$347 + $109/mo** | $34.70 |
+| 6 | 💸 Dead Lead Reactivation Blast | AI | $997 + $397/mo | **$847 + $297/mo** | $84.70 |
+| 7 | 💳 Text-to-Pay & Invoice Chaser | No AI | $297 + $149/mo | **$247 + $127/mo** | $24.70 |
+| 8 | 📣 Social + Google Posts Autopilot | AI | $497 + $597/mo | **$397 + $447/mo** | $39.70 |
+| 9 | 📝 Estimate Follow-Up Closer | No AI needed (AI add-on) | $497 + $249/mo | **$397 + $197/mo** | $39.70 |
+| 10 | 🔁 Referral & Rebooking Engine | No AI | $397 + $149/mo | **$297 + $127/mo** | $29.70 |
+
+**Commission:** reps earn **10% of the setup fee, paid once**, when the client pays. Monthly fees carry no commission.
 
 Bundles: 🛡️ Never Miss a Lead · 🤖 Robot Front Desk · 💰 Cash This Week.
 
-Change prices anytime in **Manager → Pricing**. To change the wording of scripts, pitches and objections, edit `src/workflows.js`.
+**Manager → Pricing & Profit** shows market price, our cost and profit for every workflow. It **refuses any price or commission rate that would lose money**. To change the wording of scripts, pitches and objections, edit `src/workflows.js`.
+
+---
+
+## 📧 Email drip
+
+When a rep types in a lead's email (call screen → **📧 Got their email?**, +3 points), that lead joins the drip automatically:
+
+- **Prospects:** 5 personal follow-ups over ~2 weeks. Day 0: the info they asked for. Day 2: the money math. Day 5: FAQ. Day 9: what to pair it with. Day 14: "should I close your file?". The drip stops the moment they buy.
+- **New customers:** a welcome email with their setup-form and payment links, plus reminders until the form is done.
+
+Emails go out through **Brevo** (free 300/day) or **Resend** (free 100/day) and stay under the free daily cap. Every email has the company's mailing address and an unsubscribe link (CAN-SPAM), and unsubscribed people are never emailed again. **Manager → 📧 Email Drip** shows who's in the drip, what's been sent and what's still needed to start sending.
 
 ---
 
@@ -56,6 +78,7 @@ Change prices anytime in **Manager → Pricing**. To change the wording of scrip
 | Any logged call (no answer / not interested) | +1 |
 | Callback scheduled | +2 |
 | Interested | +5 |
+| Got their email (joins the drip) | +3 |
 | Closed deal | +1 per $10 of setup fees |
 | Bundle bonus | +25 per extra workflow in the deal |
 | ⚡ Speed bonus (closed within 24h of claiming) | +20 |
@@ -71,17 +94,11 @@ Badges: First Close, Hat Trick, Dial Machine, Bundle Boss, Speed Demon, On Fire,
 
 All keys go in `.env` (see `.env.example`).
 
-### Real Google leads
-1. Go to [Google Cloud Console](https://console.cloud.google.com/) and create an API key.
-2. Enable **Places API (New)**.
-3. Set `GOOGLE_PLACES_API_KEY=...` and restart.
+Step-by-step instructions for every free tier are in **[docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md)**. In short:
 
-Each search uses Places **Text Search** and requests phone, website, rating and review count, which Google bills at its higher field tier. Check Google's pricing page and set a budget alert.
-
-### Payments (Stripe)
-- `STRIPE_SECRET_KEY` makes every close create a Stripe Checkout link (one-time setup fee + monthly subscription). The link goes into the client's onboarding page and the rep's text/email.
-- `STRIPE_WEBHOOK_SECRET`: add a Stripe webhook to `<PUBLIC_URL>/api/hooks/stripe` for `checkout.session.completed`. Deals are then marked paid automatically, which turns the rep's commission from *pending* to *earned*.
-- No Stripe? The manager clicks **Mark client paid** instead.
+- **Google leads**: enable *Places API (New)*, put the key in `GOOGLE_PLACES_API_KEY`. Google gives 1,000 searches/month free. The app counts them and stops at `GOOGLE_MONTHLY_LIMIT` (default 1000) so you're never billed by surprise, and repeat searches within 24h are served from cache.
+- **Email drip**: `BREVO_API_KEY` (or `RESEND_API_KEY`), then set the sender email and mailing address in **Manager → 📧 Email Drip**.
+- **Stripe**: `STRIPE_SECRET_KEY` creates a Checkout link (setup fee + monthly plan) on every close. With `STRIPE_WEBHOOK_SECRET` (endpoint `<PUBLIC_URL>/api/hooks/stripe`, event `checkout.session.completed`), deals are marked paid automatically and commission becomes *earned*. Without Stripe, the manager clicks **Mark client paid**.
 
 ### Automatic provisioning (Zapier / Make / n8n / GoHighLevel)
 Paste a webhook URL in **Manager → Settings** (or set `SETUP_WEBHOOK_URL`). SalesBoard POSTs JSON for these events:
@@ -105,7 +122,7 @@ curl -X POST $PUBLIC_URL/api/hooks/provisioning \
 Leave out `workflowId` to mark every workflow on the deal live.
 
 ### Hosting
-It's a single Node process that stores everything in `data/db.json`. Run it on any VPS, Render, Railway or Fly.io with a persistent disk, and set `PUBLIC_URL` to your real address so onboarding and payment links work. Back up `data/db.json`.
+It's a single Node process that stores everything in `data/db.json`. The free option is a Google Cloud e2-micro VM plus Cloudflare Tunnel (see the guide). Use `bash install.sh --service` or `docker compose up -d`, set `PUBLIC_URL` to your real address, and back up `data/db.json`.
 
 ---
 
@@ -121,6 +138,7 @@ It's a single Node process that stores everything in `data/db.json`. Run it on a
 ## 🛠️ Development
 
 ```bash
+npm run setup # change keys (.env)
 npm run dev   # auto-restart on changes
 npm test      # node:test suite (no dependencies)
 ```
@@ -131,9 +149,13 @@ src/app.js         API routes
 src/workflows.js   the Top 10 catalog, scripts, objections, onboarding fields
 src/leads.js       Google Places search, demo leads, lead scoring
 src/setup.js       one-button setup: deal, Stripe, webhooks
+src/drip.js        email drip sequences + Brevo/Resend sending + unsubscribe
+src/pricing.js     profit math (setup commission is one-time, 10%)
+scripts/setup.js   interactive .env wizard (used by install.sh)
 src/game.js        points, levels, badges, leaderboard
 src/auth.js        PIN login + sessions
-public/            dashboard (index.html, app.js, styles.css, fx.js) + client onboarding page
+public/            dashboard (index.html, app.js, styles.css, fx.js) + client onboarding + unsubscribe pages
+docs/              SETUP-GUIDE.md (free tiers) · PRICING-RESEARCH.md (market vs. our prices)
 ```
 
 Security notes: PINs are hashed with scrypt, and logins lock for 5 minutes after 5 wrong PINs. API keys never leave the server. Onboarding links use random 128-bit tokens. Use HTTPS in production.

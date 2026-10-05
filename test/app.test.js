@@ -99,8 +99,8 @@ test('full flow: claim → call → one-button close → commission → payout',
 
   const deal = await call('POST', '/api/deals', { token: rep, body: { leadId, workflowIds: ['missed_call_textback', 'review_engine'], contact: { name: 'Mike', email: 'mike@example.com' } } });
   assert.strictEqual(deal.status, 200);
-  assert.strictEqual(deal.body.deal.setupTotal, 497 + 597);
-  assert.strictEqual(deal.body.deal.commission, 109.4, '10% of setup fees');
+  assert.strictEqual(deal.body.deal.setupTotal, 447 + 347);
+  assert.strictEqual(deal.body.deal.commission, 79.4, '10% of setup fees');
   assert.strictEqual(deal.body.deal.commissionStatus, 'pending');
   assert.strictEqual(deal.body.deal.onboardingToken, undefined, 'token never leaks in API responses');
   assert.strictEqual(deal.body.deal.webhook.status, 'sent');
@@ -122,7 +122,7 @@ test('full flow: claim → call → one-button close → commission → payout',
   const board = await call('GET', '/api/leaderboard?period=today', { token: rep });
   const me = board.body.rows.find((r) => r.userId === repId);
   assert.strictEqual(me.rank, 1);
-  assert.strictEqual(me.commission, 109.4);
+  assert.strictEqual(me.commission, 79.4);
 
   // Reps can't use manager endpoints.
   assert.strictEqual((await call('POST', `/api/admin/deals/${db.deals[0].id}/paid`, { token: rep })).status, 403);
@@ -131,11 +131,11 @@ test('full flow: claim → call → one-button close → commission → payout',
   assert.strictEqual((await call('POST', `/api/admin/deals/${db.deals[0].id}/payout`, { token: manager })).status, 400);
   await call('POST', `/api/admin/deals/${db.deals[0].id}/paid`, { token: manager });
   let stats = (await call('GET', '/api/me', { token: rep })).body.stats;
-  assert.strictEqual(stats.commission.earned, 109.4);
+  assert.strictEqual(stats.commission.earned, 79.4);
   const payout = await call('POST', `/api/admin/reps/${repId}/payout`, { token: manager });
-  assert.strictEqual(payout.body.amount, 109.4);
+  assert.strictEqual(payout.body.amount, 79.4);
   stats = (await call('GET', '/api/me', { token: rep })).body.stats;
-  assert.strictEqual(stats.commission.paidOut, 109.4);
+  assert.strictEqual(stats.commission.paidOut, 79.4);
 });
 
 test('cancelling a deal removes points and commission', async () => {
@@ -198,4 +198,126 @@ test('google places results are mapped into leads', async () => {
   assert.strictEqual(r.body.leads[0].source, 'google');
   assert.strictEqual(r.body.leads[0].name, 'Real Plumbing');
   assert.strictEqual(r.body.nextPageToken, 'abc');
+});
+
+test('every workflow is priced under market and profitable after commission', () => {
+  const { profitFor } = require('../src/pricing');
+  for (const w of WORKFLOWS) {
+    assert.ok(w.setupFee < w.market.setup && w.monthlyFee < w.market.monthly, `${w.id} must be under market`);
+    const p = profitFor(w, 0.10);
+    assert.ok(p.ok && p.setupProfit > 0 && p.monthlyProfit > 0, `${w.id} must be profitable`);
+  }
+});
+
+test('price edits that lose money are rejected', async () => {
+  const { call } = setup();
+  const { manager } = await managerAndRep(call);
+  const bad = await call('PATCH', '/api/admin/workflows/missed_call_textback', { token: manager, body: { setupFee: 100 } });
+  assert.strictEqual(bad.status, 400);
+  assert.match(bad.body.error, /lose money/);
+  const badMonthly = await call('PATCH', '/api/admin/workflows/ai_receptionist', { token: manager, body: { monthlyFee: 99 } });
+  assert.strictEqual(badMonthly.status, 400);
+  const good = await call('PATCH', '/api/admin/workflows/missed_call_textback', { token: manager, body: { setupFee: 397 } });
+  assert.strictEqual(good.status, 200);
+  assert.ok(good.body.profit.setupProfit > 0);
+  assert.strictEqual((await call('PATCH', '/api/admin/settings', { token: manager, body: { commissionRate: 0.9 } })).status, 400);
+});
+
+test('commission is a one-time 10% of setup only (never on monthly fees)', async () => {
+  const { db, call } = setup();
+  const { manager, rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Big Social Co', phone: '555', industry: 'gym' } } })).body.lead;
+  const d = (await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['social_autopilot'] } })).body.deal;
+  assert.strictEqual(d.commission, 39.7); // 10% of $397 setup, not of the $447/mo
+  await call('POST', `/api/admin/deals/${d.id}/paid`, { token: manager });
+  await call('POST', `/api/admin/deals/${d.id}/paid`, { token: manager }); // paying twice changes nothing
+  const stats = (await call('GET', '/api/me', { token: rep })).body.stats;
+  assert.strictEqual(stats.commission.lifetime, 39.7);
+  assert.strictEqual(db.deals.length, 1);
+});
+
+test('email drip: lead email enrolls, sends via Brevo, stops on purchase, unsubscribe works', async () => {
+  const sent = [];
+  let clock = Date.parse('2026-10-05T14:00:00Z');
+  const fetchImpl = async (url, opts) => {
+    if (url.includes('brevo')) sent.push(JSON.parse(opts.body));
+    return { ok: true, json: async () => ({}) };
+  };
+  const db = new DB(null);
+  const app = createApp({ db, env: { BREVO_API_KEY: 'x', PUBLIC_URL: 'https://board.example' }, fetchImpl, now: () => clock });
+  const call = client(app);
+  const { manager, rep } = await managerAndRep(call);
+  await call('PATCH', '/api/admin/settings', { token: manager, body: { fromEmail: 'hello@agency.example', businessAddress: '1 Main St, Norfolk, VA' } });
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Joe Plumbing', phone: '555', industry: 'plumber', city: 'Norfolk, VA' } } })).body.lead;
+
+  assert.strictEqual((await call('POST', `/api/leads/${lead.id}/email`, { token: rep, body: { email: 'nope' } })).status, 400);
+  const r = await call('POST', `/api/leads/${lead.id}/email`, { token: rep, body: { email: 'Joe@Plumbing.example', name: 'Joe Smith' } });
+  assert.strictEqual(r.status, 200);
+  assert.strictEqual(r.body.pointsEarned, 3);
+  assert.strictEqual(r.body.drip.sequence, 'prospect');
+
+  await app.runDrips();
+  assert.strictEqual(sent.length, 1);
+  assert.strictEqual(sent[0].to[0].email, 'joe@plumbing.example');
+  assert.match(sent[0].subject, /Joe Plumbing/);
+  assert.match(sent[0].textContent, /Hi Joe,/);
+  assert.match(sent[0].textContent, /1 Main St, Norfolk, VA/); // mailing address in footer
+  assert.match(sent[0].textContent, /board\.example\/unsubscribe\//);
+  assert.ok(sent[0].headers['List-Unsubscribe']);
+
+  await app.runDrips(); // nothing due yet
+  assert.strictEqual(sent.length, 1);
+  clock += 49 * 3600000;
+  await app.runDrips();
+  assert.strictEqual(sent.length, 2);
+
+  // They buy → prospect drip ends, customer welcome goes out.
+  await call('POST', '/api/deals', { token: rep, body: { leadId: lead.id, workflowIds: ['missed_call_textback'], contact: { name: 'Joe', email: 'joe@plumbing.example' } } });
+  await new Promise((res) => setImmediate(res));
+  await app.runDrips();
+  const prospect = db.data.drips.find((d) => d.sequence === 'prospect');
+  const customer = db.data.drips.find((d) => d.sequence === 'customer');
+  assert.strictEqual(prospect.status, 'completed');
+  assert.match(sent.at(-1).subject, /Welcome aboard/);
+  assert.match(sent.at(-1).textContent, /\/onboard\//);
+
+  // Unsubscribe stops everything and blocks future enrollments.
+  const un = await call('POST', `/api/unsubscribe/${customer.token}`);
+  assert.strictEqual(un.status, 200);
+  assert.strictEqual(customer.status, 'unsubscribed');
+  clock += 5 * 86400000;
+  const before = sent.length;
+  await app.runDrips();
+  assert.strictEqual(sent.length, before);
+  const lead2 = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Joe Second Shop', phone: '556', industry: 'plumber' } } })).body.lead;
+  const again = await call('POST', `/api/leads/${lead2.id}/email`, { token: rep, body: { email: 'joe@plumbing.example' } });
+  assert.strictEqual(again.body.suppressed, true);
+});
+
+test('email drip waits (does not drop) until provider + sender are set up', async () => {
+  const db = new DB(null);
+  const app = createApp({ db, env: {}, fetchImpl: async () => ({ ok: true, json: async () => ({}) }) });
+  const call = client(app);
+  const { rep } = await managerAndRep(call);
+  const lead = (await call('POST', '/api/leads/claim', { token: rep, body: { lead: { name: 'Shop', phone: '1', industry: 'salon' } } })).body.lead;
+  await call('POST', `/api/leads/${lead.id}/email`, { token: rep, body: { email: 'a@b.example' } });
+  const r = await app.runDrips();
+  assert.strictEqual(r.sent, 0);
+  assert.match(r.reason, /email provider/);
+  assert.strictEqual(db.data.drips[0].status, 'active');
+});
+
+test('google searches stop at the free monthly limit and repeat searches use the cache', async () => {
+  let calls = 0;
+  const fetchImpl = async () => { calls++; return { ok: true, json: async () => ({ places: [] }) }; };
+  const { call } = setup({ GOOGLE_PLACES_API_KEY: 'k', GOOGLE_MONTHLY_LIMIT: '2' }, fetchImpl);
+  const { rep } = await managerAndRep(call);
+  const q = (city) => call('GET', `/api/leads/search?industry=hvac&city=${encodeURIComponent(city)}`, { token: rep });
+  assert.strictEqual((await q('Norfolk, VA')).status, 200);
+  assert.strictEqual((await q('Norfolk, VA')).status, 200); // cached
+  assert.strictEqual(calls, 1);
+  assert.strictEqual((await q('Suffolk, VA')).status, 200);
+  const blocked = await q('Hampton, VA');
+  assert.strictEqual(blocked.status, 429);
+  assert.strictEqual(calls, 2);
 });

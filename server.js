@@ -25,8 +25,14 @@ server.listen(PORT, () => {
   console.log(`\n  🚀 SalesBoard is running → http://localhost:${PORT}\n`);
   console.log(`  Google leads: ${process.env.GOOGLE_PLACES_API_KEY ? '✅ live' : '🧪 demo data (set GOOGLE_PLACES_API_KEY for real leads)'}`);
   console.log(`  Stripe:       ${process.env.STRIPE_SECRET_KEY ? '✅ payment links on' : '— off'}`);
-  console.log(`  Webhook:      ${process.env.SETUP_WEBHOOK_URL ? '✅ ' + process.env.SETUP_WEBHOOK_URL : '— set in Manager → Settings'}\n`);
+  console.log(`  Webhook:      ${process.env.SETUP_WEBHOOK_URL ? '✅ ' + process.env.SETUP_WEBHOOK_URL : '— set in Manager → Settings'}`);
+  console.log(`  Email drip:   ${process.env.BREVO_API_KEY ? '✅ Brevo' : process.env.RESEND_API_KEY ? '✅ Resend' : '— add BREVO_API_KEY (emails wait in the queue until then)'}\n`);
 });
+
+// Email drip: send whatever is due every minute.
+const runDrips = () => app.runDrips().catch((err) => console.error('[drip]', err.message));
+setTimeout(runDrips, 5000);
+setInterval(runDrips, 60000);
 
 const shutdown = () => { db.flush(); process.exit(0); };
 process.on('SIGINT', shutdown);

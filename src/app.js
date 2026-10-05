@@ -10,6 +10,8 @@ const leadsLib = require('./leads');
 const game = require('./game');
 const setup = require('./setup');
 const demo = require('./demo');
+const drip = require('./drip');
+const { profitFor } = require('./pricing');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.webmanifest': 'application/manifest+json' };
@@ -24,6 +26,12 @@ const DEFAULT_SETTINGS = {
   contestPrize: 'Top points this week wins a $100 bonus 🏆',
   webhookUrl: '',
   claimDays: 7,
+  // Email drip (anti-spam law needs a real sender + mailing address)
+  fromName: '',
+  fromEmail: '',
+  replyTo: '',
+  businessAddress: '',
+  emailDailyCap: 0, // 0 = provider's free-tier default
 };
 
 const AVATARS = ['🦊', '🐺', '🦄', '🐯', '🐼', '🦁', '🐸', '🐙', '🦅', '🐲', '🦈', '🐻', '🐵', '🦉', '🐬', '🚀'];
@@ -39,11 +47,24 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   const publicUrl = () => (env.PUBLIC_URL || `http://localhost:${env.PORT || 3000}`).replace(/\/$/, '');
   const googleKey = () => env.GOOGLE_PLACES_API_KEY || '';
   const webhookUrl = () => settings().webhookUrl || env.SETUP_WEBHOOK_URL || '';
+  // Google gives 1,000 free Text Search (Enterprise) calls a month. We count
+  // every call and stop at the limit so nobody gets a surprise bill.
+  const googleLimit = () => (env.GOOGLE_MONTHLY_LIMIT === undefined ? 1000 : Number(env.GOOGLE_MONTHLY_LIMIT) || 0);
+  const monthKey = () => new Date(now()).toISOString().slice(0, 7);
+  const googleUsed = () => db.data.usage.google?.[monthKey()] || 0;
+  const dripOpts = () => ({ settings: settings(), env, catalog: catalog(), publicUrl: publicUrl(), fetchImpl });
+  const runDrips = () => drip.tick(db, { ...dripOpts(), now: now() });
 
   function catalog() {
     return WORKFLOWS.map((w) => {
       const o = db.workflowOverrides[w.id] || {};
-      return { ...w, setupFee: o.setupFee ?? w.setupFee, monthlyFee: o.monthlyFee ?? w.monthlyFee, enabled: o.enabled ?? true };
+      return {
+        ...w,
+        setupFee: o.setupFee ?? w.setupFee,
+        monthlyFee: o.monthlyFee ?? w.monthlyFee,
+        cost: { setup: o.costSetup ?? w.cost.setup, monthly: o.costMonthly ?? w.cost.monthly },
+        enabled: o.enabled ?? true,
+      };
     });
   }
 
@@ -164,6 +185,11 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       deal.contact.phone = String(body.contact.phone || deal.contact.phone).slice(0, 40);
     }
     deal.onboarding = { submittedAt: now(), answers };
+    if (drip.validEmail(deal.contact.email)) {
+      const lead = db.leads.find((l) => l.id === deal.leadId);
+      // Setup is done, so the customer drip just completes on its next check.
+      drip.enroll(db, { email: deal.contact.email, name: deal.contact.name, lead, deal, sequence: 'customer', by: deal.repId, now: now() });
+    }
     db.save();
     deal.webhook = await setup.sendWebhook({ url: webhookUrl(), secret: env.WEBHOOK_SECRET, event: 'onboarding.completed', deal, publicUrl: publicUrl(), fetchImpl });
     db.save();
@@ -208,7 +234,8 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   };
 
   route('GET', '/api/catalog', () => ({
-    workflows: catalog().filter((w) => w.enabled),
+    // Reps see market prices (to show the savings) but not our internal costs.
+    workflows: catalog().filter((w) => w.enabled).map(({ cost, ...w }) => w),
     bundles: BUNDLES,
     objections: UNIVERSAL_OBJECTIONS,
     opener: OPENER,
@@ -227,7 +254,22 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     if (!city) throw new HttpError(400, 'Type a city, like "Norfolk, VA".');
     let result;
     if (googleKey() && !String(query.pageToken || '').startsWith('demo:')) {
-      result = await leadsLib.searchGoogle({ apiKey: googleKey(), industryKey: industry, city, pageToken: query.pageToken, fetchImpl });
+      // Same search within 24h is served from cache: free, and instant.
+      const cacheKey = `${industry}|${city.toLowerCase()}|${query.pageToken || ''}`;
+      const cached = db.data.searchCache[cacheKey];
+      if (cached && now() - cached.at < 86400000) {
+        result = cached.result;
+      } else {
+        if (googleUsed() >= googleLimit()) {
+          throw new HttpError(429, `This month's ${googleLimit()} free Google searches are used up. Work your current leads, add leads by hand, or ask your manager to raise GOOGLE_MONTHLY_LIMIT.`);
+        }
+        db.data.usage.google = db.data.usage.google || {};
+        db.data.usage.google[monthKey()] = googleUsed() + 1;
+        result = await leadsLib.searchGoogle({ apiKey: googleKey(), industryKey: industry, city, pageToken: query.pageToken, fetchImpl });
+        for (const [k, v] of Object.entries(db.data.searchCache)) if (now() - v.at > 86400000) delete db.data.searchCache[k];
+        db.data.searchCache[cacheKey] = { at: now(), result };
+        db.save();
+      }
     } else {
       const page = Number(String(query.pageToken || 'demo:0').split(':')[1]) || 0;
       result = leadsLib.demoLeads({ industryKey: industry, city, page });
@@ -295,7 +337,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
 
   route('GET', '/api/leads/:id', ({ params, user }) => {
     const lead = myLead(user, params.id);
-    return { lead, deals: db.deals.filter((d) => d.leadId === lead.id).map(setup.publicDeal) };
+    return { lead, deals: db.deals.filter((d) => d.leadId === lead.id).map(setup.publicDeal), drip: drip.summaryFor(db, lead.id) };
   });
 
   route('POST', '/api/leads/:id/outcome', ({ params, body, user }) => {
@@ -325,6 +367,38 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     lead.lastActivityAt = now();
     db.save();
     return { lead };
+  });
+
+  // They gave us their email → save it and start the drip.
+  route('POST', '/api/leads/:id/email', ({ params, body, user }) => {
+    const lead = myLead(user, params.id);
+    const email = String(body.email || '').trim().slice(0, 200);
+    if (!drip.validEmail(email)) throw new HttpError(400, 'That email doesn\'t look right. Double-check it with them.');
+    const firstTime = !lead.email;
+    lead.email = email;
+    if (body.name) lead.contactName = String(body.name).trim().slice(0, 80);
+    if (Array.isArray(body.pitched) && body.pitched[0]) lead.pitchedWorkflow = String(body.pitched[0]).slice(0, 60);
+    lead.lastActivityAt = now();
+    const won = lead.status === 'won';
+    const deal = won ? db.deals.find((d) => d.leadId === lead.id && d.status !== 'cancelled') : null;
+    const r = drip.enroll(db, { email, name: lead.contactName, lead, deal, sequence: won && deal ? 'customer' : 'prospect', by: user.id, now: now() });
+    if (r.error) throw new HttpError(400, r.error);
+    let pointsEarned = 0;
+    if (firstTime && !db.events.some((e) => e.leadId === lead.id && e.type === 'email' && !e.voided)) {
+      pointsEarned = game.POINTS.email;
+      addEvent(user, 'email', pointsEarned, { leadId: lead.id });
+    }
+    lead.history.push({ at: now(), by: user.name, text: r.suppressed ? `📧 Saved ${email} (they unsubscribed before, so no emails)` : `📧 Added ${email} to the email drip` });
+    db.save();
+    return { lead, drip: drip.summaryFor(db, lead.id), suppressed: Boolean(r.suppressed), pointsEarned, stats: game.repStats(db, user.id, settings(), now()) };
+  });
+
+  route('POST', '/api/leads/:id/drip/stop', ({ params, user }) => {
+    const lead = myLead(user, params.id);
+    const n = drip.stopFor(db, (d) => d.leadId === lead.id, `Stopped by ${user.name}`);
+    lead.history.push({ at: now(), by: user.name, text: '🛑 Stopped the email drip' });
+    db.save();
+    return { stopped: n, drip: drip.summaryFor(db, lead.id) };
   });
 
   route('POST', '/api/leads/:id/release', ({ params, user }) => {
@@ -361,6 +435,12 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       try { deal.paymentUrl = await setup.createStripeCheckout({ deal, secretKey: env.STRIPE_SECRET_KEY, publicUrl: publicUrl(), fetchImpl }); } catch (err) { deal.paymentError = err.message; }
     }
     deal.webhook = await setup.sendWebhook({ url: webhookUrl(), secret: env.WEBHOOK_SECRET, event: 'deal.created', deal, publicUrl: publicUrl(), fetchImpl });
+    if (deal.contact.email && drip.validEmail(deal.contact.email)) {
+      lead.email = deal.contact.email;
+      if (deal.contact.name) lead.contactName = deal.contact.name;
+      drip.enroll(db, { email: deal.contact.email, name: deal.contact.name, lead, deal, sequence: 'customer', by: rep.id, now: now() });
+      runDrips().catch((err) => console.error('[drip]', err.message));
+    }
     db.save();
     return {
       deal: setup.publicDeal(deal),
@@ -399,6 +479,9 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     webhook: Boolean(webhookUrl()),
     webhookSecret: Boolean(env.WEBHOOK_SECRET),
     publicUrl: publicUrl(),
+    googleUsed: googleUsed(),
+    googleLimit: googleLimit(),
+    email: drip.readiness(db, settings(), env),
   });
 
   route('GET', '/api/admin/overview', () => {
@@ -411,7 +494,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       deals,
       settings: settings(),
       integrations: integrations(),
-      workflows: catalog().map((w) => ({ id: w.id, name: w.name, emoji: w.emoji, setupFee: w.setupFee, monthlyFee: w.monthlyFee, enabled: w.enabled })),
+      workflows: catalog().map((w) => ({ id: w.id, name: w.name, emoji: w.emoji, setupFee: w.setupFee, monthlyFee: w.monthlyFee, market: w.market, cost: w.cost, enabled: w.enabled, profit: profitFor(w, settings().commissionRate) })),
       totals: {
         setupSold: live.reduce((s, d) => s + d.setupTotal, 0),
         mrr: live.reduce((s, d) => s + d.monthlyTotal, 0),
@@ -480,6 +563,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     if (d.commissionStatus === 'paid_out') throw new HttpError(400, 'Commission was already paid out on this deal. Sort it out with the rep before cancelling.');
     d.status = 'cancelled';
     d.commissionStatus = 'cancelled';
+    drip.stopFor(db, (x) => x.dealId === d.id, 'Deal cancelled');
     db.events.forEach((e) => { if (e.dealId === d.id) e.voided = true; });
     const lead = db.leads.find((l) => l.id === d.leadId);
     if (lead) { lead.status = 'interested'; lead.history.push({ at: now(), by: 'Manager', text: 'Deal cancelled' }); }
@@ -516,10 +600,21 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     if (body.commissionRate != null) {
       const r = Number(body.commissionRate);
       if (!(r >= 0 && r <= 1)) throw new HttpError(400, 'Commission rate must be between 0% and 100%.');
+      // Profit check: the new rate must still leave every workflow profitable on setup.
+      const losers = catalog().filter((w) => w.enabled && !profitFor(w, r).ok);
+      if (losers.length) throw new HttpError(400, `At ${Math.round(r * 1000) / 10}% commission these workflows would lose money on setup: ${losers.map((w) => w.name).join(', ')}.`);
       s.commissionRate = r;
     }
     for (const k of ['dailyCallGoal', 'dailyCloseGoal', 'claimDays']) if (body[k] != null) s[k] = Math.max(0, Number.parseInt(body[k], 10) || 0);
-    for (const k of ['defaultCity', 'contestTitle', 'contestPrize']) if (body[k] != null) s[k] = String(body[k]).slice(0, 200);
+    for (const k of ['defaultCity', 'contestTitle', 'contestPrize', 'fromName', 'businessAddress']) if (body[k] != null) s[k] = String(body[k]).trim().slice(0, 200);
+    for (const k of ['fromEmail', 'replyTo']) {
+      if (body[k] == null) continue;
+      const v = String(body[k]).trim();
+      if (v && !drip.validEmail(v)) throw new HttpError(400, `${k === 'fromEmail' ? 'Sender' : 'Reply-to'} email doesn't look right.`);
+      s[k] = v;
+    }
+    if (body.emailDailyCap != null) s.emailDailyCap = Math.max(0, Number.parseInt(body.emailDailyCap, 10) || 0);
+
     if (body.webhookUrl != null) {
       const u = String(body.webhookUrl).trim();
       if (u && !/^https?:\/\//.test(u)) throw new HttpError(400, 'Webhook URL must start with https://');
@@ -531,13 +626,17 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
 
   route('PATCH', '/api/admin/workflows/:id', ({ params, body }) => {
     if (!WORKFLOWS.some((w) => w.id === params.id)) throw new HttpError(404, 'Workflow not found.');
-    const o = db.workflowOverrides[params.id] || {};
-    if (body.setupFee != null) o.setupFee = Math.max(0, Number(body.setupFee) || 0);
-    if (body.monthlyFee != null) o.monthlyFee = Math.max(0, Number(body.monthlyFee) || 0);
+    const o = { ...(db.workflowOverrides[params.id] || {}) };
+    for (const k of ['setupFee', 'monthlyFee', 'costSetup', 'costMonthly']) if (body[k] != null) o[k] = Math.max(0, Number(body[k]) || 0);
     if (typeof body.enabled === 'boolean') o.enabled = body.enabled;
+    // Never let a price change turn a workflow into a money-loser.
+    const base = WORKFLOWS.find((w) => w.id === params.id);
+    const next = { ...base, setupFee: o.setupFee ?? base.setupFee, monthlyFee: o.monthlyFee ?? base.monthlyFee, cost: { setup: o.costSetup ?? base.cost.setup, monthly: o.costMonthly ?? base.cost.monthly } };
+    const profit = profitFor(next, settings().commissionRate);
+    if (!profit.ok) throw new HttpError(400, `That price would lose money: ${profit.problems.join('; ')}.`);
     db.workflowOverrides[params.id] = o;
     db.save();
-    return { ok: true };
+    return { ok: true, profit };
   }, { admin: true });
 
   route('POST', '/api/admin/test-webhook', async ({ user }) => {
@@ -547,6 +646,58 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   }, { admin: true });
 
   route('POST', '/api/admin/demo', () => ({ reps: demo.seedDemo(db, catalog(), settings(), now()) }), { admin: true });
+
+  // ---- email drip (manager) ----
+  route('GET', '/api/admin/drips', () => {
+    const rows = db.data.drips.slice().sort((a, b) => b.createdAt - a.createdAt).slice(0, 300).map((d) => {
+      const lead = db.leads.find((l) => l.id === d.leadId);
+      return { id: d.id, email: d.email, name: d.name, business: lead?.name || '', sequence: d.sequence, status: d.status, step: d.step, total: drip.SEQUENCES[d.sequence].length, nextAt: d.status === 'active' ? d.nextAt : null, lastError: d.lastError || '', endedReason: d.endedReason || '', sent: d.sent };
+    });
+    const active = db.data.drips.filter((d) => d.status === 'active').length;
+    return { rows, active, suppressed: db.data.suppressed.length, status: drip.readiness(db, settings(), env) };
+  }, { admin: true });
+
+  route('POST', '/api/admin/drips/:id/stop', ({ params, user }) => {
+    const n = drip.stopFor(db, (d) => d.id === params.id, `Stopped by ${user.name}`);
+    db.save();
+    return { stopped: n };
+  }, { admin: true });
+
+  route('POST', '/api/admin/drips/run', async () => runDrips(), { admin: true });
+
+  route('POST', '/api/admin/test-email', async ({ body, user }) => {
+    const to = String(body.to || '').trim();
+    if (!drip.validEmail(to)) throw new HttpError(400, 'Enter the email to send the test to.');
+    const st = drip.readiness(db, settings(), env);
+    if (!st.ready) throw new HttpError(400, `Email isn't ready yet. Still need: ${st.missing.join(', ')}.`);
+    const fakeLead = { id: 'lead_test', name: 'Test Plumbing Co', city: 'Norfolk, VA', industry: 'plumber', repId: user.id, analysis: { recommended: ['missed_call_textback', 'review_engine', 'ai_receptionist'] } };
+    db.leads.push(fakeLead);
+    try {
+      const ctx = drip.buildContext(db, { leadId: fakeLead.id, name: user.name, enrolledBy: user.id }, dripOpts());
+      const email = drip.render(drip.SEQUENCES.prospect[0], ctx, { settings: settings(), unsubscribeUrl: `${publicUrl()}/unsubscribe/test` });
+      await drip.sendEmail({ env, settings: settings(), to, toName: user.name, ...email, subject: `[TEST] ${email.subject}`, unsubscribeUrl: `${publicUrl()}/unsubscribe/test`, fetchImpl });
+    } catch (err) {
+      throw new HttpError(502, `Email provider said: ${err.message}`);
+    } finally {
+      db.data.leads = db.leads.filter((l) => l !== fakeLead);
+    }
+    return { ok: true };
+  }, { admin: true });
+
+  // ---- unsubscribe (public, from the email footer) ----
+  route('GET', '/api/unsubscribe/:token', ({ params }) => {
+    const d = db.data.drips.find((x) => x.token === params.token);
+    if (!d) throw new HttpError(404, 'This unsubscribe link is not valid.');
+    const masked = d.email.replace(/^(.).*(@.*)$/, '$1•••$2');
+    return { company: settings().companyName, email: masked, unsubscribed: drip.isSuppressed(db, d.email) };
+  }, { public: true });
+
+  route('POST', '/api/unsubscribe/:token', ({ params }) => {
+    const d = drip.unsubscribe(db, params.token);
+    if (!d) throw new HttpError(404, 'This unsubscribe link is not valid.');
+    db.save();
+    return { ok: true };
+  }, { public: true });
   route('DELETE', '/api/admin/demo', () => { demo.clearDemo(db); return { ok: true }; }, { admin: true });
 
   // ---------------- HTTP plumbing ----------------
@@ -581,6 +732,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   function serveStatic(pathname, res) {
     let file = pathname === '/' ? '/index.html' : pathname;
     if (/^\/onboard\/[a-f0-9]+\/?$/.test(pathname)) file = '/onboard.html';
+    if (/^\/unsubscribe\/[a-z0-9]+\/?$/.test(pathname)) file = '/unsubscribe.html';
     const full = path.normalize(path.join(PUBLIC_DIR, file));
     if (!full.startsWith(PUBLIC_DIR + path.sep)) return send(res, 403, { error: 'Forbidden' });
     fs.readFile(full, (err, data) => {
@@ -597,7 +749,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     });
   }
 
-  return { handle, catalog, settings };
+  return { handle, catalog, settings, runDrips };
 }
 
 function readBody(req) {

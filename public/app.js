@@ -127,7 +127,15 @@
       reviews: lead?.reviews ?? 0,
       setup: money(setup),
       monthly: money(monthly),
+      marketSetup: money(workflows.reduce((s, w) => s + (w.market?.setup || w.setupFee), 0)),
+      marketMonthly: money(workflows.reduce((s, w) => s + (w.market?.monthly || w.monthlyFee), 0)),
     };
+  }
+  const COMMISSION_NOTE = () => `${pct(S.catalog.commissionRate)} of the setup fee, paid once. No commission on monthly fees.`;
+  function savingsOf(workflows) {
+    const setup = workflows.reduce((s, w) => s + ((w.market?.setup || w.setupFee) - w.setupFee), 0);
+    const monthly = workflows.reduce((s, w) => s + ((w.market?.monthly || w.monthlyFee) - w.monthlyFee), 0);
+    return { setup, monthly, firstYear: setup + monthly * 12 };
   }
   const commissionOf = (setup) => Math.round(setup * (S.catalog?.commissionRate ?? 0.1) * 100) / 100;
   function pointsOf(workflows) {
@@ -407,8 +415,8 @@
             <div><b>2. Call</b> 📞<br><span class="muted">Tap Call and read the script on screen. It's written for you.</span></div>
             <div><b>3. Press YES</b> 🎉<br><span class="muted">When they agree, hit the gold button. We handle setup, billing and onboarding.</span></div>
           </div>
-          <p class="small" style="margin-top:.8rem">Points: 📞 any call <b>+1</b> · ⏰ callback <b>+2</b> · 🙂 interested <b>+5</b> · 🎉 close <b>+1 per $10</b> of setup · 📦 bundle <b>+${S.catalog.points.bundleBonus}</b>/extra workflow · ⚡ close within 24h <b>+${S.catalog.points.speedBonus}</b><br>
-          💰 You keep <b>${pct(S.catalog.commissionRate)}</b> of every setup fee you sell.</p>
+          <p class="small" style="margin-top:.8rem">Points: 📞 any call <b>+1</b> · ⏰ callback <b>+2</b> · 📧 got their email <b>+${S.catalog.points.email}</b> · 🙂 interested <b>+5</b> · 🎉 close <b>+1 per $10</b> of setup · 📦 bundle <b>+${S.catalog.points.bundleBonus}</b>/extra workflow · ⚡ close within 24h <b>+${S.catalog.points.speedBonus}</b><br>
+          💰 You earn <b>${COMMISSION_NOTE()}</b></p>
         </div>
       </div>`;
   }
@@ -565,13 +573,14 @@
   const STEPS = ['👋 Open', '🎣 Hook', '❓ Ask', '💡 Pitch', '🤝 Close'];
 
   async function viewCall(view, leadId) {
-    const { lead, deals } = await api('GET', `/api/leads/${encodeURIComponent(leadId)}`);
+    const { lead, deals, drip } = await api('GET', `/api/leads/${encodeURIComponent(leadId)}`);
     if (S.call.leadId !== lead.id) {
       const rec = (lead.analysis?.recommended || []).filter((id) => wfById(id));
       S.call = { leadId: lead.id, lead, step: 0, selected: rec.slice(0, 1), showAll: false, obj: null, roi: {} };
     }
     S.call.lead = lead;
     S.call.deals = deals;
+    S.call.drip = drip;
     drawCall(view);
   }
 
@@ -618,6 +627,7 @@
         </div>
 
         <div class="stack">
+          ${emailHtml(lead)}
           ${won ? '' : pickerHtml(lead, wfs)}
           ${won ? '' : earnHtml(wfs)}
           ${won || !wfs[0] ? '' : roiHtml(lead, wfs[0])}
@@ -668,7 +678,7 @@
         <div class="wf-pick ${S.call.selected.includes(w.id) ? 'on' : ''}" data-act="toggle-wf" data-id="${w.id}">
           <span class="em">${w.emoji}</span>
           <div class="body"><div class="ellipsis"><b>${esc(w.name)}</b></div>${rec.includes(w.id) ? '<span class="rec">⭐ RECOMMENDED</span>' : `<span class="tiny muted">${w.ai === 'ai' ? '🤖 AI' : '⚙️ No AI needed'}</span>`}</div>
-          <div class="price">${money(w.setupFee)}<div class="tiny muted">+${money(w.monthlyFee)}/mo</div></div>
+          <div class="price">${w.market ? `<s class="tiny muted">${money(w.market.setup)}</s> ` : ''}${money(w.setupFee)}<div class="tiny muted">+${money(w.monthlyFee)}/mo</div></div>
         </div>`).join('')}</div>
       <div class="row" style="margin-top:.6rem">
         <button class="btn sm ghost" data-act="show-all-wf">${S.call.showAll ? 'Show fewer' : `Show all ${all.length}`}</button>
@@ -678,14 +688,38 @@
     </div>`;
   }
 
+  function emailHtml(lead) {
+    const d = S.call.drip;
+    const status = d ? {
+      active: `📬 In the email drip: ${d.step} of ${d.total} sent${d.nextAt ? ` · next ${when(d.nextAt)}` : ''}`,
+      completed: `✅ Drip finished. ${esc(d.endedReason)}`,
+      stopped: `🛑 Drip stopped. ${esc(d.endedReason)}`,
+      unsubscribed: '🚫 They unsubscribed. No more emails.',
+      failed: `⚠️ Emails failing: ${esc(d.endedReason)}`,
+    }[d.status] : '';
+    return `<div class="card">
+      <h3>📧 Got their email?</h3>
+      ${lead.email ? `<p class="small"><b>${esc(lead.contactName || '')}</b> ${esc(lead.email)}</p><p class="small">${status || '📭 Not in a drip'}</p>
+        ${d && d.status === 'active' ? '<button class="btn sm ghost" data-act="drip-stop">🛑 Stop emails</button>' : ''}` : `
+      <p class="small muted">Type it in and they get our follow-up emails automatically. <b style="color:var(--gold)">+${S.catalog.points.email} pts</b></p>
+      <form class="stack" data-form="lead-email">
+        <input class="input" name="name" placeholder="Their first name" value="${esc(lead.contactName || '')}">
+        <input class="input" name="email" type="email" placeholder="name@business.com" required>
+        <button class="btn primary block">📨 Add to email drip</button>
+      </form>`}
+    </div>`;
+  }
+
   function earnHtml(wfs) {
     const setup = wfs.reduce((s, w) => s + w.setupFee, 0);
     const monthly = wfs.reduce((s, w) => s + w.monthlyFee, 0);
     return `<div class="earn">
       <div class="row between"><div><div class="label">Their price</div><b style="font-size:1.15rem">${money(setup)}</b> setup + <b>${money(monthly)}</b>/mo</div></div>
+      ${wfs.length && savingsOf(wfs).firstYear > 0 ? `<div class="small" style="margin-top:.3rem">🏷️ Typical agencies: <s>${money(setup + savingsOf(wfs).setup)} + ${money(monthly + savingsOf(wfs).monthly)}/mo</s>. They save <b style="color:var(--gold)">${money(savingsOf(wfs).firstYear)}</b> in year one.</div>` : ''}
       <div class="row between" style="margin-top:.5rem"><div><div class="label">You earn</div><div class="big">${money(commissionOf(setup))}</div></div>
       <div class="center"><div class="label">Points</div><div class="big" style="color:var(--gold)">+${wfs.length ? pointsOf(wfs) : 0}</div></div></div>
-      ${wfs.length === 1 ? `<div class="tiny muted" style="margin-top:.3rem">💡 Add a 2nd workflow for +${S.catalog.points.bundleBonus} bonus pts</div>` : ''}
+      <div class="tiny muted" style="margin-top:.3rem">You earn ${COMMISSION_NOTE()}</div>
+      ${wfs.length === 1 ? `<div class="tiny muted" style="margin-top:.2rem">💡 Add a 2nd workflow for +${S.catalog.points.bundleBonus} bonus pts</div>` : ''}
     </div>`;
   }
 
@@ -794,8 +828,8 @@
           </div>
           <div><div class="label">2 · Who's the owner?</div>
             <div class="stack" style="margin-top:.4rem">
-              <input class="input" name="name" placeholder="Owner's first name" value="${esc(S.call.yesDraft?.name || '')}">
-              <input class="input" name="email" type="email" placeholder="Their email (for the setup link)" value="${esc(S.call.yesDraft?.email || '')}">
+              <input class="input" name="name" placeholder="Owner's first name" value="${esc(S.call.yesDraft?.name ?? lead.contactName ?? '')}">
+              <input class="input" name="email" type="email" placeholder="Their email (setup link + reminder emails)" value="${esc(S.call.yesDraft?.email ?? lead.email ?? '')}">
               <input class="input" name="phone" type="tel" placeholder="Their cell" value="${esc(S.call.yesDraft?.phone ?? lead.phone ?? '')}">
             </div>
           </div>
@@ -868,7 +902,7 @@
         <div class="row between"><h1>📘 The Playbook</h1><button class="btn sm no-print" onclick="window.print()">🖨️ Print cheat sheet</button></div>
         <div class="card">
           <h3>💰 How you get paid</h3>
-          <p>You earn <b style="color:var(--green)">${pct(S.catalog.commissionRate)} of the setup fee</b> on every deal you close. It unlocks the moment the client pays.
+          <p>You earn <b style="color:var(--green)">${pct(S.catalog.commissionRate)} of the setup fee</b> on every deal you close, paid once. It unlocks the moment the client pays the setup fee. Monthly fees don't pay commission.
           Sell a ${money(ws[0].setupFee)} ${esc(ws[0].name)} → you make <b>${money(commissionOf(ws[0].setupFee))}</b>. Sell the ${esc(S.catalog.bundles[0].name)} bundle → you make <b>${money(commissionOf(S.catalog.bundles[0].workflows.map(wfById).filter(Boolean).reduce((s, w) => s + w.setupFee, 0)))}</b>.</p>
           <p class="small muted">You never set anything up yourself. Press the gold YES button and the system sends the client their payment link and setup form, and kicks off the automation.</p>
         </div>
@@ -881,7 +915,7 @@
               <div class="rank">#${w.rank} · ${esc(w.closeSpeed)}</div>
               <h3 style="margin:.1rem 0">${esc(w.name)}</h3>
               <div class="chips" style="gap:.3rem">${aiTag(w)}<span class="tag good">You earn ${money(commissionOf(w.setupFee))}</span></div>
-            </div><div class="center"><b>${money(w.setupFee)}</b><div class="tiny muted">+${money(w.monthlyFee)}/mo</div></div></div>
+            </div><div class="center"><b>${money(w.setupFee)}</b><div class="tiny muted">+${money(w.monthlyFee)}/mo</div>${w.market ? `<div class="tiny muted">others: <s>${money(w.market.setup)} + ${money(w.market.monthly)}/mo</s></div>` : ''}</div></div>
             <p class="small" style="margin-top:.6rem">${esc(w.tagline)}</p>
             <div class="demand"><span>Demand</span><div class="bar"><i style="width:${w.demand}%"></i></div><span>${w.demand}</span></div>
             <details>
@@ -949,7 +983,7 @@
             </tr>`).join('') || '<tr><td colspan="8" class="center muted">No one on the board yet. Be first!</td></tr>'}</tbody>
           </table>
         </div>
-        <p class="small muted">Points: call +1 · callback +2 · interested +5 · close +1 per $10 setup · bundle +${S.catalog.points.bundleBonus}/extra workflow · speed close +${S.catalog.points.speedBonus}. Commission = ${pct(S.catalog.commissionRate)} of setup fees.</p>
+        <p class="small muted">Points: call +1 · callback +2 · email +${S.catalog.points.email} · interested +5 · close +1 per $10 setup · bundle +${S.catalog.points.bundleBonus}/extra workflow · speed close +${S.catalog.points.speedBonus}. Commission = ${COMMISSION_NOTE()}</p>
       </div>`;
   }
 
@@ -968,7 +1002,7 @@
           <div class="card"><div class="label">⏳ Pending</div><div class="stat">${money(c.pending)}</div><div class="small muted">Client hasn't paid yet</div></div>
           <div class="card"><div class="label">✅ Earned</div><div class="stat green">${money(c.earned)}</div><div class="small muted">Coming in your next payout</div></div>
           <div class="card"><div class="label">💸 Paid out</div><div class="stat">${money(c.paidOut)}</div><div class="small muted">Already in your pocket</div></div>
-          <div class="card"><div class="label">🏆 Lifetime</div><div class="stat gold">${money(c.lifetime)}</div><div class="small muted">${pct(S.catalog.commissionRate)} of every setup fee</div></div>
+          <div class="card"><div class="label">🏆 Lifetime</div><div class="stat gold">${money(c.lifetime)}</div><div class="small muted">${pct(S.catalog.commissionRate)} of each setup fee, paid once</div></div>
         </div>
         <div class="card">
           <h3>Your deals</h3>
@@ -990,6 +1024,7 @@
   async function viewAdmin(view) {
     const d = await api('GET', '/api/admin/overview');
     S.admin.data = d;
+    S.admin.drips = S.admin.tab === 'drip' ? await api('GET', '/api/admin/drips') : null;
     const t = S.admin.tab;
     view.innerHTML = `
       <div class="stack">
@@ -1000,8 +1035,8 @@
           <div class="card"><div class="label">Commission owed now</div><div class="stat gold">${money(d.totals.commissionOwed)}</div><div class="tiny muted">+ ${money(d.totals.commissionPending)} pending payment</div></div>
           <div class="card"><div class="label">Deals</div><div class="stat">${d.totals.deals}</div></div>
         </div>
-        <div class="tabs">${[['deals', '📑 Deals'], ['team', '👥 Team & Payouts'], ['pricing', '🏷️ Pricing'], ['settings', '⚙️ Settings']].map(([k, l]) => `<button class="tab ${t === k ? 'on' : ''}" data-act="admin-tab" data-k="${k}">${l}</button>`).join('')}</div>
-        <div>${t === 'deals' ? adminDeals(d) : t === 'team' ? adminTeam(d) : t === 'pricing' ? adminPricing(d) : adminSettings(d)}</div>
+        <div class="tabs">${[['deals', '📑 Deals'], ['team', '👥 Team & Payouts'], ['pricing', '🏷️ Pricing & Profit'], ['drip', '📧 Email Drip'], ['settings', '⚙️ Settings']].map(([k, l]) => `<button class="tab ${t === k ? 'on' : ''}" data-act="admin-tab" data-k="${k}">${l}</button>`).join('')}</div>
+        <div>${t === 'deals' ? adminDeals(d) : t === 'team' ? adminTeam(d) : t === 'pricing' ? adminPricing(d) : t === 'drip' ? adminDrip(S.admin.drips) : adminSettings(d)}</div>
       </div>`;
   }
 
@@ -1073,15 +1108,67 @@
   }
 
   function adminPricing(d) {
-    return `<div class="card table-wrap">
-      <p class="small muted">Changing prices affects new deals only. Rep commission = ${pct(d.settings.commissionRate)} of the setup fee.</p>
-      <table class="tbl"><thead><tr><th>Workflow</th><th>Setup $</th><th>Monthly $</th><th>Selling?</th><th></th></tr></thead><tbody>
+    const num = (w, k, v) => `<input class="input" style="width:92px" type="number" min="0" value="${v}" data-price="${w.id}" data-k="${k}">`;
+    const avgMonthly = d.workflows.reduce((s, w) => s + w.profit.monthlyProfit, 0) / d.workflows.length;
+    return `<div class="stack">
+      <div class="card small">
+        <b>How the math works.</b> Prices sit 10–25% under what agencies typically charge (see <code>docs/PRICING-RESEARCH.md</code>).
+        Setup profit = setup fee − rep commission (${pct(d.settings.commissionRate)}, paid once) − setup cost − card fees (2.9% + 30¢).
+        Monthly profit = monthly fee − tool cost − card fees. The app <b>won't save a price that loses money</b>.
+        Your platform subscription (e.g. GoHighLevel) is a fixed cost: at ~${money(Math.round(avgMonthly))}/mo profit per workflow, about ${Math.max(1, Math.ceil(297 / Math.max(1, avgMonthly)))} live workflows cover a $297/mo plan.
+      </div>
+      <div class="card table-wrap">
+      <table class="tbl"><thead><tr><th>Workflow</th><th>Market</th><th>Our setup $</th><th>Our monthly $</th><th>Cost: setup / mo</th><th class="num">Profit</th><th>Selling?</th><th></th></tr></thead><tbody>
       ${d.workflows.map((w) => `<tr><td>${w.emoji} <b>${esc(w.name)}</b></td>
-        <td><input class="input" style="width:110px" type="number" min="0" value="${w.setupFee}" data-price="${w.id}" data-k="setupFee"></td>
-        <td><input class="input" style="width:110px" type="number" min="0" value="${w.monthlyFee}" data-price="${w.id}" data-k="monthlyFee"></td>
+        <td class="small muted">${money(w.market.setup)}<br>+${money(w.market.monthly)}/mo</td>
+        <td>${num(w, 'setupFee', w.setupFee)}</td>
+        <td>${num(w, 'monthlyFee', w.monthlyFee)}</td>
+        <td><div class="row" style="gap:.3rem;flex-wrap:nowrap">${num(w, 'costSetup', w.cost.setup)}${num(w, 'costMonthly', w.cost.monthly)}</div></td>
+        <td class="num small"><b style="color:${w.profit.ok ? 'var(--green)' : 'var(--red)'}">${money(w.profit.setupProfit)}</b> setup<br><b style="color:var(--green)">${money(w.profit.monthlyProfit)}</b>/mo (${w.profit.monthlyMargin}%)<br><span class="muted">yr 1: ${money(w.profit.firstYearProfit)}</span></td>
         <td><input type="checkbox" style="width:22px;height:22px;accent-color:var(--green)" ${w.enabled ? 'checked' : ''} data-price="${w.id}" data-k="enabled"></td>
         <td><button class="btn sm go" data-act="save-price" data-id="${w.id}">Save</button></td></tr>`).join('')}
-      </tbody></table></div>`;
+      </tbody></table>
+      <p class="tiny muted">Price changes only affect new deals. Costs are estimates: update them with your real tool bills.</p></div>
+    </div>`;
+  }
+
+  function adminDrip(x) {
+    if (!x) return '<p class="muted">Loading…</p>';
+    const st = x.status; const s = S.admin.data.settings;
+    const label = { active: '📬 Active', completed: '✅ Done', stopped: '🛑 Stopped', unsubscribed: '🚫 Unsubscribed', failed: '⚠️ Failed' };
+    return `<div class="stack">
+      <div class="card" style="border-color:${st.ready ? 'var(--green)' : 'var(--warm)'}">
+        ${st.ready ? `✅ <b>Sending with ${esc(st.provider)}</b> · ${st.sentToday} of ${st.cap} sent today (free-tier cap)` : `⏸️ <b>Emails are queued but not sending yet.</b> Still need: ${st.missing.map(esc).join(', ')}.`}
+        <div class="small muted" style="margin-top:.3rem">${x.active} people in a drip · ${x.suppressed} unsubscribed. Leads who give an email get 5 follow-ups over ~2 weeks. New customers get a welcome + setup-form reminders.</div>
+      </div>
+      <div class="grid two">
+        <form class="card stack" data-form="email-settings">
+          <h3>✉️ Sender details</h3>
+          <div class="field"><label>From name</label><input class="input" name="fromName" value="${esc(s.fromName)}" placeholder="${esc(s.companyName)}"></div>
+          <div class="field"><label>From email (must be verified with Brevo/Resend)</label><input class="input" name="fromEmail" type="email" value="${esc(s.fromEmail)}" placeholder="hello@yourdomain.com"></div>
+          <div class="field"><label>Replies go to</label><input class="input" name="replyTo" type="email" value="${esc(s.replyTo)}" placeholder="sales@yourdomain.com"></div>
+          <div class="field"><label>Business mailing address (required by law in every email)</label><input class="input" name="businessAddress" value="${esc(s.businessAddress)}" placeholder="123 Main St, Norfolk, VA 23510"></div>
+          <div class="field"><label>Max emails per day (0 = free-tier default: Brevo 280, Resend 95)</label><input class="input" name="emailDailyCap" type="number" min="0" value="${s.emailDailyCap || 0}"></div>
+          <button class="btn go">💾 Save sender details</button>
+        </form>
+        <div class="card stack">
+          <h3>🧪 Test it</h3>
+          <form class="row" data-form="test-email"><input class="input" name="to" type="email" placeholder="you@example.com" style="flex:1" required><button class="btn primary">Send test</button></form>
+          <button class="btn" data-act="drip-run">▶ Send due emails now</button>
+          <p class="tiny muted">The app also checks for due emails every minute on its own.</p>
+        </div>
+      </div>
+      <div class="card table-wrap">
+        <h3>📬 Who's in the drip</h3>
+        ${x.rows.length ? `<table class="tbl"><thead><tr><th>Contact</th><th>Drip</th><th>Progress</th><th>Status</th><th></th></tr></thead><tbody>
+        ${x.rows.map((r) => `<tr><td><b>${esc(r.name || r.email)}</b><div class="tiny muted">${esc(r.email)}${r.business ? ` · ${esc(r.business)}` : ''}</div></td>
+          <td>${r.sequence === 'customer' ? '🎉 Customer' : '🌱 Prospect'}</td>
+          <td class="small">${r.sent.length} of ${r.total} sent${r.nextAt ? `<br><span class="muted">next ${when(r.nextAt)}</span>` : ''}</td>
+          <td class="small">${label[r.status] || esc(r.status)}${r.endedReason ? `<br><span class="muted">${esc(r.endedReason)}</span>` : ''}${r.lastError && r.status === 'active' ? `<br><span style="color:var(--red)">${esc(r.lastError)}</span>` : ''}</td>
+          <td>${r.status === 'active' ? `<button class="btn sm danger" data-act="admin-drip-stop" data-id="${esc(r.id)}">Stop</button>` : ''}</td></tr>`).join('')}
+        </tbody></table>` : '<p class="muted">Nobody yet. When a rep adds a lead\'s email, they show up here.</p>'}
+      </div>
+    </div>`;
   }
 
   function adminSettings(d) {
@@ -1105,7 +1192,8 @@
         <div class="card">
           <h3>🔌 Integrations</h3>
           <div class="stack small">
-            <div>${ok(i.google)} <b>Google leads</b>: ${i.google ? 'live Google Business data' : 'demo mode. Add <code>GOOGLE_PLACES_API_KEY</code> to <code>.env</code>'}</div>
+            <div>${ok(i.google)} <b>Google leads</b>: ${i.google ? `live Google Business data · ${i.googleUsed} of ${i.googleLimit} free searches used this month` : 'demo mode. Add <code>GOOGLE_PLACES_API_KEY</code> to <code>.env</code>'}</div>
+            <div>${ok(i.email.ready)} <b>Email drip</b>: ${i.email.ready ? `sending with ${esc(i.email.provider)}` : 'see the 📧 Email Drip tab'}</div>
             <div>${ok(i.stripe)} <b>Stripe payment links</b>: ${i.stripe ? 'on' : 'add <code>STRIPE_SECRET_KEY</code>'}</div>
             <div>${ok(i.stripeWebhook)} <b>Auto-mark paid from Stripe</b>: ${i.stripeWebhook ? 'on' : `add <code>STRIPE_WEBHOOK_SECRET</code>, endpoint <code>${esc(i.publicUrl)}/api/hooks/stripe</code>`}</div>
             <div>${ok(i.webhook)} <b>Automation webhook</b>: ${i.webhook ? 'on' : 'paste a URL on the left'}</div>
@@ -1211,13 +1299,22 @@
       const id = el.dataset.id;
       const get = (k) => document.querySelector(`[data-price="${id}"][data-k="${k}"]`);
       try {
-        await api('PATCH', `/api/admin/workflows/${id}`, { setupFee: Number(get('setupFee').value), monthlyFee: Number(get('monthlyFee').value), enabled: get('enabled').checked });
+        const r = await api('PATCH', `/api/admin/workflows/${id}`, { setupFee: Number(get('setupFee').value), monthlyFee: Number(get('monthlyFee').value), costSetup: Number(get('costSetup').value), costMonthly: Number(get('costMonthly').value), enabled: get('enabled').checked });
         S.catalog = await api('GET', '/api/catalog');
-        toast('🏷️ Price saved', 'good');
+        toast(`🏷️ Saved. Profit: ${money(r.profit.setupProfit)} on setup + ${money(r.profit.monthlyProfit)}/mo`, 'good', 4500);
+        viewAdmin(document.getElementById('view'));
       } catch (err) { fail(err); }
     },
     'test-webhook': async () => {
       try { const r = await api('POST', '/api/admin/test-webhook'); toast(r.status === 'sent' ? '✅ Test webhook delivered' : `❌ ${esc(r.error || r.status)}`, r.status === 'sent' ? 'good' : 'bad'); } catch (err) { fail(err); }
+    },
+    'drip-stop': async () => {
+      if (!confirm('Stop sending emails to this lead?')) return;
+      try { const r = await api('POST', `/api/leads/${S.call.lead.id}/drip/stop`); S.call.drip = r.drip; drawCall(); toast('🛑 Emails stopped'); } catch (err) { fail(err); }
+    },
+    'admin-drip-stop': (el) => adminAction(`/api/admin/drips/${el.dataset.id}/stop`, '🛑 Drip stopped'),
+    'drip-run': async () => {
+      try { const r = await api('POST', '/api/admin/drips/run'); toast(r.reason ? `⏸️ Not sending yet: ${esc(r.reason)}` : `📨 Sent ${r.sent} email${r.sent === 1 ? '' : 's'}`, r.reason ? 'bad' : 'good', 5000); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
     },
     'demo-load': async () => { try { const r = await api('POST', '/api/admin/demo'); toast(`🧪 Loaded ${r.reps} demo reps`, 'good'); refreshAfterAdmin(); } catch (err) { fail(err); } },
     'demo-clear': async () => { if (!confirm('Remove all demo reps, leads and deals?')) return; try { await api('DELETE', '/api/admin/demo'); toast('Demo data removed'); refreshAfterAdmin(); } catch (err) { fail(err); } },
@@ -1264,6 +1361,23 @@
       logOutcome('callback', { callbackAt: new Date(at).getTime(), note: fd.get('note') });
     },
     yes: (fd, form) => submitYes(form),
+    'lead-email': async (fd) => {
+      try {
+        const before = S.stats;
+        const r = await api('POST', `/api/leads/${S.call.lead.id}/email`, { email: fd.get('email'), name: fd.get('name'), pitched: S.call.selected });
+        S.call.lead = r.lead; S.call.drip = r.drip; S.stats = r.stats;
+        celebrateChanges(before, r.stats); updateChrome('call');
+        if (r.pointsEarned) FX.sound('point');
+        toast(r.suppressed ? '📧 Saved. They unsubscribed before, so no emails will go out.' : `📨 Added to the email drip!${r.pointsEarned ? ` <b>+${r.pointsEarned} pts</b>` : ''}`, r.suppressed ? '' : 'gold');
+        drawCall();
+      } catch (err) { fail(err); }
+    },
+    'email-settings': async (fd) => {
+      try { await api('PATCH', '/api/admin/settings', Object.fromEntries(fd)); toast('💾 Sender details saved', 'good'); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
+    },
+    'test-email': async (fd) => {
+      try { await api('POST', '/api/admin/test-email', { to: fd.get('to') }); toast('📨 Test email sent. Check your inbox (and spam folder).', 'good', 5000); } catch (err) { fail(err); }
+    },
     'add-user': async (fd, form) => {
       try { const { user } = await api('POST', '/api/admin/users', Object.fromEntries(fd)); toast(`${esc(user.avatar)} ${esc(user.name)} added! Their PIN is what you typed.`, 'good', 5000); form.reset(); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
     },

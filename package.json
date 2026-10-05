@@ -5,9 +5,11 @@
   "main": "server.js",
   "private": true,
   "scripts": {
+    "setup": "node scripts/setup.js",
     "start": "node server.js",
     "dev": "node --watch server.js",
-    "test": "node --test test/*.test.js"
+    "test": "node --test test/*.test.js",
+    "install-all": "bash install.sh"
   },
   "engines": {
     "node": ">=20"

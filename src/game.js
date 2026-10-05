@@ -7,6 +7,7 @@ const POINTS = {
   not_interested: 1,
   callback: 2,
   interested: 5,
+  email: 3, // got their email (they go into the drip)
   perSetupDollars: 10, // 1 point per $10 of setup fees sold
   bundleBonus: 25, // per extra workflow in the same deal
   speedBonus: 20, // closed within 24h of claiming the lead

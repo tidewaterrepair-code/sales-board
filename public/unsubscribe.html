@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>Unsubscribe</title>
+  <style>
+    :root { --bg: #f5f7fb; --card: #fff; --text: #14183a; --muted: #5f6787; --line: #e1e5f0; --brand: #3a72e6; color-scheme: light; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #0b1026; --card: #18214a; --text: #eef1ff; --muted: #9aa6d6; --line: #2b3770; color-scheme: dark; } }
+    body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.5 system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif; }
+    main { max-width: 480px; margin: 0 auto; padding: 3rem 16px; }
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: 18px; padding: 1.5rem; text-align: center; }
+    h1 { font-size: 1.4rem; margin: .5rem 0; }
+    .muted { color: var(--muted); }
+    button { font: inherit; font-weight: 700; padding: .9rem 1.4rem; border-radius: 12px; border: 0; background: var(--brand); color: #fff; cursor: pointer; width: 100%; margin-top: 1rem; }
+    .big { font-size: 3rem; }
+  </style>
+</head>
+<body>
+  <main><div class="card" id="root"><p class="muted">Loading…</p></div></main>
+  <script>
+  (function () {
+    const root = document.getElementById('root');
+    const token = location.pathname.split('/').filter(Boolean)[1];
+    const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const done = (company) => { root.innerHTML = `<div class="big">✅</div><h1>You're unsubscribed</h1><p class="muted">You won't get any more emails from ${esc(company)}. Sorry to see you go!</p>`; };
+    fetch(`/api/unsubscribe/${encodeURIComponent(token)}`).then((r) => r.json().then((d) => ({ ok: r.ok, d }))).then(({ ok, d }) => {
+      if (!ok) { root.innerHTML = `<div class="big">🔗</div><h1>Link not found</h1><p class="muted">${esc(d.error)}</p>`; return; }
+      if (d.unsubscribed) return done(d.company);
+      root.innerHTML = `<div class="big">📭</div><h1>Unsubscribe ${esc(d.email)}?</h1><p class="muted">You'll stop getting emails from ${esc(d.company)}.</p><button id="go">Yes, unsubscribe me</button>`;
+      document.getElementById('go').addEventListener('click', async (e) => {
+        e.target.disabled = true;
+        const r = await fetch(`/api/unsubscribe/${encodeURIComponent(token)}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+        if (r.ok) done(d.company); else { e.target.disabled = false; e.target.textContent = 'Something went wrong. Try again'; }
+      });
+    }).catch(() => { root.innerHTML = '<h1>Connection problem</h1><p class="muted">Please refresh the page.</p>'; });
+  })();
+  </script>
+</body>
+</html>

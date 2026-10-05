@@ -16,6 +16,10 @@ const EMPTY = () => ({
   events: [],
   settings: {},
   workflowOverrides: {},
+  drips: [],
+  suppressed: [],
+  usage: {},
+  searchCache: {},
 });
 
 class DB {
