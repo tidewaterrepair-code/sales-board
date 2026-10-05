@@ -109,9 +109,9 @@ Wishing you a great season!
 Welcome to {{company}}! We're excited to get {{business}} set up with:
 {{dealItems}}
 
-One quick step (about 3 minutes): fill in your setup form so we can build everything for you.
+One quick step (about 3 minutes): fill in your setup form so we can finish everything for you.
 {{onboardingUrl}}
-{{payLine}}
+{{payLine}}{{loginLine}}
 Questions? Just reply to this email.
 
 {{rep}}
@@ -260,6 +260,7 @@ function buildContext(db, d, { settings, catalog, publicUrl }) {
     dealItems: deal ? deal.workflows.map((w) => `• ${w.emoji} ${w.name}`).join('\n') : '',
     onboardingUrl: deal ? `${publicUrl}/onboard/${deal.onboardingToken}` : '',
     payLine: deal && deal.paymentUrl && !deal.paidAt ? `\nSecure your spot by paying the setup fee here:\n${deal.paymentUrl}\n` : '',
+    loginLine: deal && deal.ghl?.userId && settings.clientLoginUrl ? `\nYour account (see your leads, texts and reviews): ${settings.clientLoginUrl}\nFirst time? Click "Forgot password" and use this email to set your password.\n` : '',
     _deal: deal,
   };
 }

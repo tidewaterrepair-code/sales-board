@@ -69,7 +69,13 @@ const WORKFLOWS = [
       { key: 'alert_cell', label: 'Cell phone that should get the alerts', type: 'tel', required: true },
       { key: 'textback_message', label: 'Text-back message (we wrote one for you)', type: 'textarea', default: 'Hi! Sorry we missed your call at {{business}}. How can we help you today?' },
     ],
-    setupTasks: ['Provision local SMS number', 'Connect missed-call forwarding', 'Load text-back message', 'Run live test call with client'],
+    setupTasks: [
+      { by: 'ghl', label: 'Text-back workflow switched on' },
+      { by: 'onboarding', label: 'Client setup form received' },
+      { by: 'team', label: 'Add a texting number + A2P registration (GoHighLevel → Settings → Phone Numbers)' },
+      { by: 'client', label: 'Client forwards missed calls to the new number' },
+      { by: 'team', label: 'Make a test call' },
+    ],
   },
   {
     id: 'review_engine',
@@ -118,7 +124,13 @@ const WORKFLOWS = [
       { key: 'customer_source', label: 'How do you track customers? (e.g. Jobber, Square, paper, Google Sheet)', type: 'text', required: true },
       { key: 'bad_review_email', label: 'Email to alert if a customer is unhappy', type: 'email', required: true, prefill: 'email' },
     ],
-    setupTasks: ['Verify Google review link', 'Connect customer source / CRM', 'Load review request templates', 'Enable AI review replies (if purchased)', 'Send test request to owner'],
+    setupTasks: [
+      { by: 'ghl', label: 'Review-request workflow switched on' },
+      { by: 'ghl', label: 'Google review link loaded' },
+      { by: 'onboarding', label: 'Client setup form received' },
+      { by: 'team', label: 'Connect their customer list or job app' },
+      { by: 'team', label: 'Send a test review request to the owner' },
+    ],
   },
   {
     id: 'ai_receptionist',
@@ -170,7 +182,13 @@ const WORKFLOWS = [
       { key: 'transfer_number', label: 'Number to transfer urgent calls to', type: 'tel', required: true },
       { key: 'calendar', label: 'Calendar you book in (Google, Outlook, software name)', type: 'text' },
     ],
-    setupTasks: ['Build AI knowledge base from onboarding', 'Configure voice + greeting', 'Connect calendar booking', 'Set transfer / emergency rules', 'Install website chat widget', 'Run 5 test calls & client sign-off'],
+    setupTasks: [
+      { by: 'retell', label: 'AI receptionist built from their business info' },
+      { by: 'retell', label: 'Local phone number bought + connected to the AI' },
+      { by: 'onboarding', label: 'Hours, services and FAQs added to the AI' },
+      { by: 'client', label: 'Client forwards calls (or after-hours calls) to the AI number' },
+      { by: 'team', label: 'Make 3 test calls' },
+    ],
   },
   {
     id: 'speed_to_lead',
@@ -219,7 +237,12 @@ const WORKFLOWS = [
       { key: 'website', label: 'Website URL', type: 'url', prefill: 'website' },
       { key: 'alert_cell', label: 'Cell phone for new-lead alerts', type: 'tel', required: true },
     ],
-    setupTasks: ['Connect website form', 'Connect Facebook / Google lead sources', 'Load instant-reply text + email', 'Configure AI qualification (if purchased)', 'Submit test lead & verify < 60s'],
+    setupTasks: [
+      { by: 'ghl', label: 'Instant-reply workflow switched on' },
+      { by: 'onboarding', label: 'Client setup form received' },
+      { by: 'team', label: 'Connect their website form / Facebook leads' },
+      { by: 'team', label: 'Send a test lead and check the reply comes in under 60 seconds' },
+    ],
   },
   {
     id: 'booking_noshow',
@@ -268,7 +291,12 @@ const WORKFLOWS = [
       { key: 'services', label: 'Services + how long each takes', type: 'textarea', required: true },
       { key: 'current_booking', label: 'Current booking software (if any)', type: 'text' },
     ],
-    setupTasks: ['Build booking calendar + services', 'Add Book Now to Google Business Profile', 'Configure confirmation & reminder texts', 'Embed booking on website / Facebook', 'Test booking end-to-end'],
+    setupTasks: [
+      { by: 'ghl', label: 'Booking + reminder workflow switched on' },
+      { by: 'onboarding', label: 'Hours and services received' },
+      { by: 'team', label: 'Add services to the calendar + put the Book Now link on Google' },
+      { by: 'team', label: 'Book a test appointment' },
+    ],
   },
   {
     id: 'reactivation',
@@ -317,7 +345,12 @@ const WORKFLOWS = [
       { key: 'list_size', label: 'Rough number of contacts', type: 'number' },
       { key: 'offer', label: 'Offer to send (e.g. $50 off a tune-up)', type: 'text', required: true },
     ],
-    setupTasks: ['Collect & clean contact list', 'Write campaign + offer copy', 'Train AI reply agent', 'Compliance check (opt-out, consent)', 'Launch campaign & monitor replies'],
+    setupTasks: [
+      { by: 'ghl', label: 'Reactivation campaign + AI replies switched on' },
+      { by: 'onboarding', label: 'Offer and list location received' },
+      { by: 'team', label: 'Import their customer list' },
+      { by: 'team', label: 'Launch the campaign' },
+    ],
   },
   {
     id: 'text_to_pay',
@@ -366,7 +399,12 @@ const WORKFLOWS = [
       { key: 'processor', label: 'Payment processor (Stripe, Square, QuickBooks…)', type: 'text', required: true },
       { key: 'invoice_tool', label: 'How do you create invoices today?', type: 'text', required: true },
     ],
-    setupTasks: ['Connect payment processor', 'Connect invoicing tool', 'Load invoice text + reminder sequence', 'Send test invoice'],
+    setupTasks: [
+      { by: 'ghl', label: 'Invoice reminder workflow switched on' },
+      { by: 'onboarding', label: 'Payment processor info received' },
+      { by: 'team', label: 'Connect their payment processor (GoHighLevel → Payments)' },
+      { by: 'team', label: 'Send a test invoice' },
+    ],
   },
   {
     id: 'social_autopilot',
@@ -415,7 +453,12 @@ const WORKFLOWS = [
       { key: 'brand', label: 'Brand colors / logo link (or "use my website")', type: 'text' },
       { key: 'topics', label: 'Specials, services or topics to highlight', type: 'textarea' },
     ],
-    setupTasks: ['Build brand kit', 'Connect Facebook, Instagram, Google Business Profile', 'Generate first 2 weeks of posts', 'Client approves first batch', 'Enable autopilot schedule'],
+    setupTasks: [
+      { by: 'ghl', label: 'Social posting workflow switched on' },
+      { by: 'onboarding', label: 'Brand info + topics received' },
+      { by: 'team', label: 'Connect Facebook, Instagram and Google in Social Planner' },
+      { by: 'team', label: 'Load the first 2 weeks of posts' },
+    ],
   },
   {
     id: 'estimate_followup',
@@ -463,7 +506,12 @@ const WORKFLOWS = [
       { key: 'estimate_tool', label: 'How do you send estimates? (software, email, paper)', type: 'text', required: true },
       { key: 'avg_quote', label: 'Average quote size ($)', type: 'number' },
     ],
-    setupTasks: ['Connect estimating tool / intake', 'Load follow-up sequence', 'Configure stop-on-reply rules', 'Enable AI replies (if purchased)', 'Test with sample estimate'],
+    setupTasks: [
+      { by: 'ghl', label: 'Estimate follow-up workflow switched on' },
+      { by: 'onboarding', label: 'Client setup form received' },
+      { by: 'team', label: 'Connect how they send estimates' },
+      { by: 'team', label: 'Test with a sample estimate' },
+    ],
   },
   {
     id: 'referral_rebook',
@@ -511,7 +559,12 @@ const WORKFLOWS = [
       { key: 'rebook_interval', label: 'How often should customers come back?', type: 'text', required: true, placeholder: 'Every 6 months' },
       { key: 'referral_reward', label: 'Referral reward (for both sides)', type: 'text', required: true, placeholder: '$25 off' },
     ],
-    setupTasks: ['Import customer list + last visit dates', 'Configure rebooking intervals', 'Create referral offer + link', 'Load message templates', 'Test end-to-end'],
+    setupTasks: [
+      { by: 'ghl', label: 'Rebooking + referral workflow switched on' },
+      { by: 'onboarding', label: 'Reward + rebook timing received' },
+      { by: 'team', label: 'Import customer list with last visit dates' },
+      { by: 'team', label: 'Test end-to-end' },
+    ],
   },
 ];
 
@@ -537,6 +590,17 @@ const BUNDLES = [
   { id: 'cash_now', name: 'Cash This Week', emoji: '💰', workflows: ['reactivation', 'text_to_pay', 'estimate_followup'], pitch: 'Wake up old customers, close old quotes, and collect unpaid invoices.' },
 ];
 
+// Optional AI upgrade for workflows marked ai: 'optional'. Monthly only,
+// so it never changes the rep's (setup-only) commission.
+const AI_ADDON = { monthly: 47, cost: 12 };
+
+// Who finishes each setup task:
+//   ghl        done automatically when the GoHighLevel sub-account is built
+//   retell     done automatically when the AI receptionist is built
+//   onboarding done automatically when the client submits the setup form
+//   team/client  a person does it (shown on the manager's checklist)
+const TASK_OWNERS = { ghl: '🤖 Automatic', retell: '🤖 Automatic', onboarding: '📝 Client form', team: '🧑‍🔧 Your team', client: '📞 Client' };
+
 const BY_ID = Object.fromEntries(WORKFLOWS.map((w) => [w.id, w]));
 
-module.exports = { WORKFLOWS, UNIVERSAL_OBJECTIONS, OPENER, BUNDLES, getWorkflow: (id) => BY_ID[id] };
+module.exports = { WORKFLOWS, UNIVERSAL_OBJECTIONS, OPENER, BUNDLES, AI_ADDON, TASK_OWNERS, getWorkflow: (id) => BY_ID[id] };

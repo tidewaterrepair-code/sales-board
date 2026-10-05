@@ -21,7 +21,7 @@
     mine: { tab: 'todo', leads: null },
     call: { leadId: null, lead: null, step: 0, selected: [], showAll: false, obj: null, roi: {} },
     board: { period: 'week' },
-    admin: { tab: 'deals', data: null, open: null },
+    admin: { tab: 'launch', data: null, open: null },
     feed: { since: 0, items: [] },
   };
 
@@ -753,7 +753,8 @@
       <h2>🎉 ${esc(S.call.lead.name)} is a customer!</h2>
       <p>${deal.workflows.map((w) => `${w.emoji} ${esc(w.name)}`).join(' · ')}</p>
       <p><b>${money(deal.setupTotal)}</b> setup + <b>${money(deal.monthlyTotal)}</b>/mo · Your commission <b style="color:var(--green)">${money(deal.commission)}</b> <span class="status ${deal.commissionStatus}">${commissionLabel(deal.commissionStatus)}</span></p>
-      <a class="btn" href="#/money">💰 See in My Money</a>
+      ${deal.provisioning ? `<div class="label" style="margin-top:.6rem">Setup</div><div class="stack" style="margin-top:.4rem">${stepsHtml(deal)}</div>` : ''}
+      <a class="btn" style="margin-top:.8rem" href="#/money">💰 See in My Money</a>
     </div>`;
   }
 
@@ -812,33 +813,65 @@
   }
 
   // ⭐ ONE-BUTTON SETUP ⭐
+  // Step 1: the rep ticks what the client agreed to. Step 2: one button builds it all.
+  function yesDraftFromForm() {
+    const form = modalRoot.querySelector('form[data-form="yes"]');
+    if (!form) return;
+    const fd = new FormData(form);
+    S.call.selected = fd.getAll('wf');
+    S.call.yesDraft = {
+      name: fd.get('name'), email: fd.get('email'), phone: fd.get('phone'),
+      ai: fd.getAll('ai'), areaCode: fd.get('areaCode') ?? S.call.yesDraft?.areaCode,
+      createLogin: fd.get('createLogin') === 'on', paymentLink: fd.get('paymentLink') === 'on',
+    };
+  }
+
   function yesModal() {
     const { lead } = S.call;
     if (!S.call.selected.length) S.call.selected = (lead.analysis?.recommended || []).slice(0, 1);
+    if (!S.call.yesDraft) S.call.yesDraft = { createLogin: true, paymentLink: true, ai: [] };
     const draw = () => {
+      const d = S.call.yesDraft;
+      const addon = S.catalog.aiAddon?.monthly || 0;
       const wfs = S.call.selected.map(wfById).filter(Boolean);
+      const aiOn = (w) => w.ai === 'optional' && (d.ai || []).includes(w.id);
       const setup = wfs.reduce((s, w) => s + w.setupFee, 0);
-      const monthly = wfs.reduce((s, w) => s + w.monthlyFee, 0);
-      modal(`<h1>🎉 They said YES!</h1><p class="muted">3 quick things and you're done. We handle the rest.</p>
+      const monthly = wfs.reduce((s, w) => s + w.monthlyFee + (aiOn(w) ? addon : 0), 0);
+      const wantsAI = S.call.selected.includes('ai_receptionist');
+      const area = d.areaCode ?? String(lead.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '').slice(0, 3);
+      const c = S.catalog.connected || {};
+      modal(`<h1>🎉 They said YES!</h1><p class="muted">Tick what they agreed to, then press one button. We build everything for them.</p>
         <form class="stack" data-form="yes">
           <div><div class="label">1 · What did they say yes to?</div>
-            <div class="stack" style="margin-top:.4rem">${S.catalog.workflows.map((w) => `
-              <label class="check ${S.call.selected.includes(w.id) ? 'on' : ''}"><input type="checkbox" name="wf" value="${w.id}" ${S.call.selected.includes(w.id) ? 'checked' : ''} data-act="yes-wf">
-              <span style="flex:1">${w.emoji} <b>${esc(w.name)}</b></span><span class="small">${money(w.setupFee)} + ${money(w.monthlyFee)}/mo</span></label>`).join('')}</div>
+            <div class="stack" style="margin-top:.4rem">${S.catalog.workflows.map((w) => {
+              const on = S.call.selected.includes(w.id);
+              return `<div class="check ${on ? 'on' : ''}" style="flex-direction:column;gap:.4rem">
+                <label class="row" style="gap:.6rem;flex-wrap:nowrap;cursor:pointer;width:100%"><input type="checkbox" name="wf" value="${w.id}" ${on ? 'checked' : ''} data-act="yes-wf">
+                <span style="flex:1">${w.emoji} <b>${esc(w.name)}</b></span><span class="small">${money(w.setupFee)} + ${money(w.monthlyFee)}/mo</span></label>
+                ${on && w.ai === 'optional' && addon ? `<label class="row small" style="gap:.5rem;margin-left:2rem;cursor:pointer"><input type="checkbox" name="ai" value="${w.id}" ${aiOn(w) ? 'checked' : ''} data-act="yes-wf" style="width:18px;height:18px">🤖 Add the AI upgrade (+${money(addon)}/mo)</label>` : ''}
+              </div>`;
+            }).join('')}</div>
           </div>
           <div><div class="label">2 · Who's the owner?</div>
             <div class="stack" style="margin-top:.4rem">
-              <input class="input" name="name" placeholder="Owner's first name" value="${esc(S.call.yesDraft?.name ?? lead.contactName ?? '')}">
-              <input class="input" name="email" type="email" placeholder="Their email (setup link + reminder emails)" value="${esc(S.call.yesDraft?.email ?? lead.email ?? '')}">
-              <input class="input" name="phone" type="tel" placeholder="Their cell" value="${esc(S.call.yesDraft?.phone ?? lead.phone ?? '')}">
+              <input class="input" name="name" placeholder="Owner's name" value="${esc(d.name ?? lead.contactName ?? '')}">
+              <input class="input" name="email" type="email" placeholder="Their email (for their login + setup link)" value="${esc(d.email ?? lead.email ?? '')}">
+              <input class="input" name="phone" type="tel" placeholder="Their cell" value="${esc(d.phone ?? lead.phone ?? '')}">
             </div>
           </div>
-          <div><div class="label">3 · Check the total</div>
+          <div><div class="label">3 · Options</div>
+            <div class="stack" style="margin-top:.4rem">
+              ${wantsAI ? `<div class="row"><label class="small" style="flex:1">📞 Area code for their new AI phone number</label><input class="input" name="areaCode" inputmode="numeric" maxlength="3" style="width:90px" value="${esc(area)}"></div>` : ''}
+              <label class="check ${d.createLogin ? 'on' : ''}"><input type="checkbox" name="createLogin" ${d.createLogin ? 'checked' : ''} data-act="yes-wf"><span>🔑 Give the owner their own login to see their leads and messages</span></label>
+              <label class="check ${d.paymentLink ? 'on' : ''}"><input type="checkbox" name="paymentLink" ${d.paymentLink ? 'checked' : ''} data-act="yes-wf"><span>💳 Send them a payment link</span></label>
+            </div>
+          </div>
+          <div><div class="label">4 · Check the total</div>
             <div class="earn" style="margin-top:.4rem"><b style="font-size:1.2rem">${money(setup)}</b> setup + <b>${money(monthly)}</b>/mo<br>
-            <span class="small">You earn <b style="color:var(--green)">${money(commissionOf(setup))}</b> + <b style="color:var(--gold)">${wfs.length ? pointsOf(wfs) : 0} pts</b>${wfs.length > 1 ? ' (bundle bonus included)' : ''}</span></div>
+            <span class="small">You earn <b style="color:var(--green)">${money(commissionOf(setup))}</b> (one time) + <b style="color:var(--gold)">${wfs.length ? pointsOf(wfs) : 0} pts</b>${wfs.length > 1 ? ' (bundle bonus included)' : ''}</span></div>
           </div>
           <button class="btn go xl" ${wfs.length ? '' : 'disabled'} id="setup-btn">🚀 SET IT ALL UP</button>
-          <p class="tiny muted center">This creates the deal, their payment link and their setup form, and starts the automation.</p>
+          <p class="tiny muted center">${c.ghl ? 'Builds their account, switches on their workflows' : '🧪 Practice mode: shows every step. Real setup turns on when your manager connects the tools'}${c.retell && wantsAI ? ', builds their AI receptionist' : ''}, and sends their payment + setup links.</p>
         </form>`, { focus: false });
     };
     S.redrawYes = draw;
@@ -846,21 +879,28 @@
   }
 
   async function submitYes(form) {
-    const fd = new FormData(form);
-    const workflowIds = fd.getAll('wf');
-    if (!workflowIds.length) return toast('Tick at least one workflow ☝️', 'bad');
+    yesDraftFromForm();
+    const d = S.call.yesDraft;
+    if (!S.call.selected.length) return toast('Tick at least one workflow ☝️', 'bad');
     const btn = form.querySelector('#setup-btn');
-    btn.disabled = true; btn.textContent = '⏳ Setting everything up…';
+    btn.disabled = true; btn.textContent = '⏳ Starting setup…';
     const before = S.stats;
     try {
-      const r = await api('POST', '/api/deals', { leadId: S.call.lead.id, workflowIds, contact: { name: fd.get('name'), email: fd.get('email'), phone: fd.get('phone') } });
+      const r = await api('POST', '/api/deals', {
+        leadId: S.call.lead.id,
+        workflowIds: S.call.selected,
+        contact: { name: d.name, email: d.email, phone: d.phone },
+        options: { aiAddons: d.ai, areaCode: d.areaCode, createLogin: d.createLogin, paymentLink: d.paymentLink },
+      });
       S.stats = r.stats;
       S.call.yesDraft = null;
       FX.burst(); FX.sound('cash');
       setTimeout(() => FX.burst(120), 600);
       celebrateChanges(before, r.stats);
       updateChrome('call');
+      S.success = { dealId: r.deal.id, onboardingUrl: r.onboardingUrl };
       successModal(r.deal, r.onboardingUrl);
+      watchSetup(r.deal.id);
       pollFeed(false);
     } catch (err) {
       btn.disabled = false; btn.textContent = '🚀 SET IT ALL UP';
@@ -868,30 +908,67 @@
     }
   }
 
+  const STEP_ICON = { pending: '⚪', working: '⏳', done: '✅', practice: '🧪', skipped: '➖', failed: '⚠️' };
+  function stepsHtml(deal) {
+    const steps = deal.provisioning?.steps || [];
+    return steps.map((st) => `<div class="setup-step ${st.status}"><span class="ic">${STEP_ICON[st.status] || '⚪'}</span><div><b>${esc(st.label)}</b>${st.detail ? `<div class="tiny muted">${esc(st.detail)}</div>` : ''}</div></div>`).join('')
+      || (deal.provisioning?.status === 'running' ? '<div class="setup-step working"><span class="ic">⏳</span><div><b>Starting…</b></div></div>' : '');
+  }
+
+  async function watchSetup(dealId) {
+    for (let i = 0; i < 120; i++) {
+      await new Promise((res) => setTimeout(res, 1000));
+      if (!S.success || S.success.dealId !== dealId) return;
+      try {
+        const { deal, running } = await api('GET', `/api/deals/${dealId}`);
+        const box = document.getElementById('setup-steps');
+        if (!box) return;
+        box.innerHTML = stepsHtml(deal);
+        if (!running && deal.provisioning?.finishedAt) { renderAfterSetup(deal, S.success.onboardingUrl); return; }
+      } catch { /* keep trying */ }
+    }
+  }
+
   function successModal(deal, onboardingUrl) {
-    const first = deal.contact.name || 'there';
-    const pay = deal.paymentUrl ? ` To lock in your spot, pay securely here: ${deal.paymentUrl}` : '';
-    const msg = `Hi ${first}! It's ${S.user.name}. So excited to get ${deal.business.name} set up! Here's your 3-minute setup form: ${onboardingUrl}${pay}`;
-    const subject = `Your setup for ${deal.business.name}`;
     modal(`<div class="center">
         <div class="success-big">🎉💰🎉</div>
         <div class="points-pop">+${deal.points} pts</div>
         <h2>BOOM! ${esc(deal.business.name)} is in!</h2>
-        <p style="font-size:1.1rem">You just earned <b style="color:var(--green)">${money(deal.commission)}</b> commission<br><span class="small muted">(unlocks as soon as they pay the setup fee)</span></p>
+        <p style="font-size:1.1rem">You earned <b style="color:var(--green)">${money(deal.commission)}</b> commission<br><span class="small muted">(paid once, as soon as they pay the setup fee)</span></p>
         ${deal.speedBonus ? '<p><span class="tag good">⚡ Speed bonus +20</span></p>' : ''}
       </div>
       <div class="card" style="margin:1rem 0">
-        <div class="label">🗣️ Now say this before you hang up</div>
-        <p style="font-size:1.05rem;margin-top:.4rem">"Awesome, ${esc(first)}! I'm texting you a link right now. It takes about 3 minutes: just fill in a few details${deal.paymentUrl ? ' and take care of the setup fee' : ''}, and our team takes it from there. You'll hear from us within one business day. Welcome aboard!"</p>
+        <div class="label">🛠️ Setting everything up for them…</div>
+        <div id="setup-steps" class="stack" style="margin-top:.6rem">${stepsHtml(deal)}</div>
       </div>
-      <div class="label">Send them the setup link</div>
+      <div id="after-setup"><p class="center muted small">Keep them on the phone for a few seconds while this finishes ⏳</p></div>`,
+    { focus: false, onClose: () => { S.success = null; S.call.leadId = null; if (route()[0] === 'call') render(); } });
+  }
+
+  function renderAfterSetup(deal, onboardingUrl) {
+    const box = document.getElementById('after-setup');
+    if (!box) return;
+    const first = (deal.contact.name || 'there').split(' ')[0];
+    const pay = deal.paymentUrl ? ` To lock in your spot, pay securely here: ${deal.paymentUrl}` : '';
+    const aiNum = deal.retell?.phoneNumber;
+    const msg = `Hi ${first}! It's ${S.user.name}. ${deal.business.name} is all set up on our side! Your 3-minute setup form: ${onboardingUrl}${pay}`;
+    const subject = `Your setup for ${deal.business.name}`;
+    const problems = (deal.provisioning?.steps || []).some((s) => s.status === 'failed');
+    box.innerHTML = `
+      ${problems ? '<div class="card" style="border-color:var(--warm);margin-bottom:1rem">⚠️ One step hit a snag. <b>Don\'t worry</b>: your manager got it on their screen and can press Retry. Your deal and commission are safe.</div>' : ''}
+      <div class="card">
+        <div class="label">🗣️ Now say this before you hang up</div>
+        <p style="font-size:1.05rem;margin-top:.4rem">"Awesome, ${esc(first)}! You're all set up on our side.${aiNum ? ` Your new AI receptionist number is <b>${esc(aiNum)}</b>.` : ''} I'm texting you a link right now. It takes about 3 minutes${deal.paymentUrl ? ' to fill in a few details and take care of the setup fee' : ' to fill in a few details'}. Welcome aboard!"</p>
+      </div>
+      <div class="label" style="margin-top:1rem">Send them the setup link</div>
       <div class="grid two" style="margin:.5rem 0">
         <a class="btn go lg" href="${esc(smsHref(deal.contact.phone, msg))}">💬 Text it</a>
         <a class="btn primary lg" href="mailto:${esc(deal.contact.email)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(msg)}">📧 Email it</a>
       </div>
       <div class="copybox"><input class="input" readonly value="${esc(onboardingUrl)}"><button class="btn" data-act="copy" data-text="${esc(onboardingUrl)}">📋 Copy</button></div>
       ${deal.paymentUrl ? `<div class="copybox" style="margin-top:.5rem"><input class="input" readonly value="${esc(deal.paymentUrl)}"><button class="btn" data-act="copy" data-text="${esc(deal.paymentUrl)}">💳 Copy pay link</button></div>` : ''}
-      <button class="btn xl" style="margin-top:1rem" data-act="next-after-win">▶ On to the next one!</button>`, { focus: false, onClose: () => { S.call.leadId = null; if (route()[0] === 'call') render(); } });
+      <p class="small muted center" style="margin-top:.8rem">✅ That's it for you. Anything left (like connecting their phone line) is on your team's checklist.</p>
+      <button class="btn xl" style="margin-top:.5rem" data-act="next-after-win">▶ On to the next one!</button>`;
   }
 
   // ---------------------------------------------------------------- PLAYBOOK
@@ -1035,9 +1112,46 @@
           <div class="card"><div class="label">Commission owed now</div><div class="stat gold">${money(d.totals.commissionOwed)}</div><div class="tiny muted">+ ${money(d.totals.commissionPending)} pending payment</div></div>
           <div class="card"><div class="label">Deals</div><div class="stat">${d.totals.deals}</div></div>
         </div>
-        <div class="tabs">${[['deals', '📑 Deals'], ['team', '👥 Team & Payouts'], ['pricing', '🏷️ Pricing & Profit'], ['drip', '📧 Email Drip'], ['settings', '⚙️ Settings']].map(([k, l]) => `<button class="tab ${t === k ? 'on' : ''}" data-act="admin-tab" data-k="${k}">${l}</button>`).join('')}</div>
-        <div>${t === 'deals' ? adminDeals(d) : t === 'team' ? adminTeam(d) : t === 'pricing' ? adminPricing(d) : t === 'drip' ? adminDrip(S.admin.drips) : adminSettings(d)}</div>
+        <div class="tabs">${[['launch', '🚀 Launch'], ['deals', '📑 Deals'], ['team', '👥 Team & Payouts'], ['pricing', '🏷️ Pricing & Profit'], ['drip', '📧 Email Drip'], ['settings', '⚙️ Settings']].map(([k, l]) => `<button class="tab ${t === k ? 'on' : ''}" data-act="admin-tab" data-k="${k}">${l}</button>`).join('')}</div>
+        <div>${t === 'launch' ? adminLaunch(d) : t === 'deals' ? adminDeals(d) : t === 'team' ? adminTeam(d) : t === 'pricing' ? adminPricing(d) : t === 'drip' ? adminDrip(S.admin.drips) : adminSettings(d)}</div>
       </div>`;
+  }
+
+  function adminLaunch(d) {
+    const i = d.integrations;
+    const steps = [
+      [i.httpsUrl, 'Put SalesBoard online at your own web address', 'So reps can log in from anywhere and clients can open their links. Example: https://board.yourdomain.com', 'Parts 2–4'],
+      [i.reps > 0, 'Add your sales team', 'Manager → 👥 Team & Payouts → type their name + a PIN.', 'Part 11', '<button class="btn sm" data-act="admin-tab" data-k="team">Open Team</button>'],
+      [i.google, 'Connect Google (real leads)', 'Paste your Google Places key with npm run setup.', 'Part 5'],
+      [i.email.ready, 'Connect email (Brevo)', i.email.ready ? 'Sending.' : `Still need: ${i.email.missing.join(', ')}.`, 'Part 6', '<button class="btn sm" data-act="admin-tab" data-k="drip">Open Email Drip</button>'],
+      [i.stripe && i.stripeWebhook, 'Connect Stripe (get paid)', i.stripe ? (i.stripeWebhook ? 'Done.' : 'Add the Stripe webhook secret too.') : 'Paste your Stripe keys with npm run setup.', 'Part 7'],
+      [i.p_ghl, 'Connect GoHighLevel (builds client accounts)', 'Paste your Private Integration key + Company ID with npm run setup.', 'Part 8'],
+      [i.p_ghlSnapshot, 'Pick your GoHighLevel template (snapshot)', i.p_ghl ? 'Click the button, pick your template, Save.' : 'Connect GoHighLevel first.', 'Part 8', i.p_ghl ? snapshotPicker(d) : ''],
+      [i.p_retell, 'Connect Retell (AI receptionists)', 'Paste your Retell key with npm run setup.', 'Part 9'],
+      [i.realDeals > 0, 'Do one practice close', 'Find a lead, press THEY SAID YES, then SET IT ALL UP, and watch every step turn green.', 'Part 11', '<a class="btn sm" href="#/leads">Find a lead</a>'],
+    ];
+    const done = steps.filter((x) => x[0]).length;
+    return `<div class="stack">
+      <div class="card">
+        <div class="row between"><h3>🚀 Launch checklist</h3><b>${done} of ${steps.length} done</b></div>
+        <div class="bar" style="margin:.5rem 0 .2rem"><i style="width:${Math.round((done / steps.length) * 100)}%"></i></div>
+        <p class="small muted">Do them top to bottom. The full how-to is <code>docs/SETUP-GUIDE.md</code> (written so anyone can follow it). After changing keys, restart SalesBoard and refresh this page.</p>
+      </div>
+      ${steps.map(([ok, title, how, part, extra], n) => `<div class="card" style="${ok ? 'border-color:rgba(34,211,143,.5)' : ''}">
+        <div class="row" style="flex-wrap:nowrap;align-items:flex-start">
+          <div style="font-size:1.6rem">${ok ? '✅' : `<span class="avatar" style="width:34px;height:34px;font-size:1rem">${n + 1}</span>`}</div>
+          <div style="flex:1"><b>${esc(title)}</b><div class="small muted">${esc(how)}</div>${extra && !ok ? `<div style="margin-top:.5rem">${extra}</div>` : ''}</div>
+          <span class="tag">Guide: ${esc(part)}</span>
+        </div>
+      </div>`).join('')}
+    </div>`;
+  }
+
+  function snapshotPicker(d) {
+    const list = S.admin.snapshots;
+    if (!list) return '<button class="btn sm primary" data-act="load-snapshots">📋 Show my GoHighLevel templates</button>';
+    if (!list.length) return '<span class="small">No snapshots found. Build one first (guide Part 8).</span>';
+    return `<form class="row" data-form="snapshot"><select class="input" name="ghlSnapshotId" style="flex:1">${list.map((x) => `<option value="${esc(x.id)}" ${x.id === d.settings.ghlSnapshotId ? 'selected' : ''}>${esc(x.name)}</option>`).join('')}</select><button class="btn go sm">Save</button></form>`;
   }
 
   function adminDeals(d) {
@@ -1055,14 +1169,19 @@
             <div class="stack">
               <div><div class="label">Contact</div>${esc(x.contact.name || '–')} · ${esc(x.contact.phone || '–')} · ${esc(x.contact.email || '–')}</div>
               <div><div class="label">Business</div>${esc(x.business.phone)} · ${esc(x.business.address || x.business.city)}${x.business.website ? ` · <a href="${esc(x.business.website)}" target="_blank" rel="noopener">site</a>` : ''}</div>
-              <div><div class="label">Automation webhook</div>${x.webhook.status === 'sent' ? '✅ sent' : x.webhook.status === 'failed' ? `❌ failed: ${esc(x.webhook.error)}` : '— not configured'}${x.paymentError ? `<div class="small" style="color:var(--red)">Stripe: ${esc(x.paymentError)}</div>` : ''}</div>
+              <div><div class="label">One-button setup ${x.provisioning?.status === 'needs_attention' ? '<span class="status pending">needs attention</span>' : x.provisioning?.status === 'done' ? '<span class="status live">done</span>' : x.provisioning?.status === 'practice' ? '<span class="status paid">practice mode</span>' : ''}</div>
+                <div class="stack" style="margin-top:.4rem">${stepsHtml(x)}</div>
+                ${x.retell?.phoneNumber ? `<div class="small" style="margin-top:.4rem">📞 AI receptionist number: <b>${esc(x.retell.phoneNumber)}</b></div>` : ''}
+                ${x.ghl?.locationId ? `<div class="small">🏢 GoHighLevel sub-account: <code>${esc(x.ghl.locationId)}</code></div>` : ''}
+                ${x.provisioning?.onboardingSync ? `<div class="tiny muted">📝 Setup form synced: ${x.provisioning.onboardingSync.results.map(esc).join(' · ') || 'nothing to sync yet'}</div>` : ''}
+              </div>
               <div class="copybox"><input class="input" readonly value="${esc(x.onboardingUrl)}"><button class="btn sm" data-act="copy" data-text="${esc(x.onboardingUrl)}">📋</button></div>
               ${x.paymentUrl ? `<a class="small" href="${esc(x.paymentUrl)}" target="_blank" rel="noopener">💳 Payment link</a>` : ''}
               ${x.onboarding ? `<div><div class="label">Client onboarding answers</div><div class="small">${Object.entries(x.onboarding.answers).map(([k, v]) => `<div><b>${esc(k.replace(/_/g, ' '))}:</b> ${esc(v)}</div>`).join('')}</div></div>` : ''}
               <div class="row">
                 ${!x.paidAt && x.status !== 'cancelled' ? `<button class="btn go sm" data-act="deal-paid" data-id="${esc(x.id)}">💵 Mark client paid</button>` : ''}
                 ${x.commissionStatus === 'earned' ? `<button class="btn primary sm" data-act="deal-payout" data-id="${esc(x.id)}">💸 Commission paid to rep</button>` : ''}
-                ${x.status !== 'cancelled' ? `<button class="btn sm" data-act="deal-resend" data-id="${esc(x.id)}">🔁 Re-send automation</button>` : ''}
+                ${x.status !== 'cancelled' && (x.provisioning?.steps || []).some((st) => st.status === 'failed' || st.status === 'practice') ? `<button class="btn sm primary" data-act="deal-retry" data-id="${esc(x.id)}">🔁 Retry setup</button>` : ''}
                 ${x.status !== 'cancelled' && x.commissionStatus !== 'paid_out' ? `<button class="btn danger sm" data-act="deal-cancel" data-id="${esc(x.id)}">✖ Cancel deal</button>` : ''}
               </div>
             </div>
@@ -1070,7 +1189,8 @@
               <div class="label">Fulfillment checklist</div>
               ${x.workflows.map((w) => `<div class="card" style="padding:.8rem">
                 <div class="row between"><b>${w.emoji} ${esc(w.name)}</b><span class="status ${w.status === 'live' ? 'live' : 'pending'}">${w.status}</span></div>
-                ${w.tasks.map((tk, i) => `<label class="task"><input type="checkbox" ${tk.done ? 'checked' : ''} ${x.status === 'cancelled' ? 'disabled' : ''} data-act="task" data-deal="${esc(x.id)}" data-wf="${w.id}" data-i="${i}"> ${esc(tk.label)}</label>`).join('')}
+                ${w.aiAddon ? '<div class="tiny" style="color:var(--purple)">🤖 AI upgrade included</div>' : ''}
+                ${w.tasks.map((tk, i) => `<label class="task"><input type="checkbox" ${tk.done ? 'checked' : ''} ${x.status === 'cancelled' ? 'disabled' : ''} data-act="task" data-deal="${esc(x.id)}" data-wf="${w.id}" data-i="${i}"> <span style="flex:1">${esc(tk.label)}</span>${tk.by ? `<span class="owner-tag">${esc(S.catalog.taskOwners?.[tk.by] || tk.by)}</span>` : ''}</label>`).join('')}
                 ${w.status !== 'live' && x.status !== 'cancelled' ? `<button class="btn sm go" style="margin-top:.4rem" data-act="wf-live" data-deal="${esc(x.id)}" data-wf="${w.id}">✅ Mark live</button>` : ''}
               </div>`).join('')}
             </div>
@@ -1115,7 +1235,7 @@
         <b>How the math works.</b> Prices sit 10–25% under what agencies typically charge (see <code>docs/PRICING-RESEARCH.md</code>).
         Setup profit = setup fee − rep commission (${pct(d.settings.commissionRate)}, paid once) − setup cost − card fees (2.9% + 30¢).
         Monthly profit = monthly fee − tool cost − card fees. The app <b>won't save a price that loses money</b>.
-        Your platform subscription (e.g. GoHighLevel) is a fixed cost: at ~${money(Math.round(avgMonthly))}/mo profit per workflow, about ${Math.max(1, Math.ceil(297 / Math.max(1, avgMonthly)))} live workflows cover a $297/mo plan.
+        Your platform subscription (e.g. GoHighLevel) is a fixed cost: at ~${money(Math.round(avgMonthly))}/mo profit per workflow, about ${Math.max(1, Math.ceil(497 / Math.max(1, avgMonthly)))} live workflows cover the $497/mo Agency Pro plan (needed for one-button setup). The AI upgrade adds +${money(S.catalog.aiAddon?.monthly || 0)}/mo.
       </div>
       <div class="card table-wrap">
       <table class="tbl"><thead><tr><th>Workflow</th><th>Market</th><th>Our setup $</th><th>Our monthly $</th><th>Cost: setup / mo</th><th class="num">Profit</th><th>Selling?</th><th></th></tr></thead><tbody>
@@ -1181,6 +1301,8 @@
         <div class="field"><label>Commission (% of setup fee)</label><input class="input" name="commissionPct" type="number" min="0" max="100" step="0.5" value="${Math.round(s.commissionRate * 1000) / 10}"></div>
         <div class="row"><div class="field" style="flex:1"><label>Daily call goal</label><input class="input" name="dailyCallGoal" type="number" min="0" value="${s.dailyCallGoal}"></div>
         <div class="field" style="flex:1"><label>Daily close goal</label><input class="input" name="dailyCloseGoal" type="number" min="0" value="${s.dailyCloseGoal}"></div></div>
+        <div class="field"><label>Client login link (your GoHighLevel white-label address)</label><input class="input" name="clientLoginUrl" value="${esc(s.clientLoginUrl)}" placeholder="https://app.yourdomain.com"></div>
+        <div class="field"><label>Time zone for new client accounts</label><input class="input" name="timezone" value="${esc(s.timezone)}" placeholder="America/New_York"></div>
         <div class="field"><label>Default city for lead search</label><input class="input" name="defaultCity" value="${esc(s.defaultCity)}" placeholder="Norfolk, VA"></div>
         <div class="field"><label>Days before an untouched lead returns to the pool</label><input class="input" name="claimDays" type="number" min="1" value="${s.claimDays}"></div>
         <div class="field"><label>Contest title</label><input class="input" name="contestTitle" value="${esc(s.contestTitle)}"></div>
@@ -1193,6 +1315,8 @@
           <h3>🔌 Integrations</h3>
           <div class="stack small">
             <div>${ok(i.google)} <b>Google leads</b>: ${i.google ? `live Google Business data · ${i.googleUsed} of ${i.googleLimit} free searches used this month` : 'demo mode. Add <code>GOOGLE_PLACES_API_KEY</code> to <code>.env</code>'}</div>
+            <div>${ok(i.p_ghl)} <b>GoHighLevel</b>: ${i.p_ghl ? (i.p_ghlSnapshot ? 'builds client accounts from your template' : 'connected. Pick your template in 🚀 Launch') : 'add <code>GHL_API_KEY</code> + <code>GHL_COMPANY_ID</code>'}</div>
+            <div>${ok(i.p_retell)} <b>Retell AI receptionist</b>: ${i.p_retell ? 'builds AI receptionists + buys numbers' : 'add <code>RETELL_API_KEY</code>'}</div>
             <div>${ok(i.email.ready)} <b>Email drip</b>: ${i.email.ready ? `sending with ${esc(i.email.provider)}` : 'see the 📧 Email Drip tab'}</div>
             <div>${ok(i.stripe)} <b>Stripe payment links</b>: ${i.stripe ? 'on' : 'add <code>STRIPE_SECRET_KEY</code>'}</div>
             <div>${ok(i.stripeWebhook)} <b>Auto-mark paid from Stripe</b>: ${i.stripeWebhook ? 'on' : `add <code>STRIPE_WEBHOOK_SECRET</code>, endpoint <code>${esc(i.publicUrl)}/api/hooks/stripe</code>`}</div>
@@ -1264,15 +1388,9 @@
     'cb-quick': (el) => { closeModal(); logOutcome('callback', { callbackAt: Number(el.dataset.ts) }); },
     'ni-reason': (el) => { closeModal(); logOutcome('not_interested', { note: el.dataset.r }); },
     yes: () => yesModal(),
-    'yes-wf': () => {
-      const form = modalRoot.querySelector('form[data-form="yes"]');
-      const fd = new FormData(form);
-      S.call.selected = fd.getAll('wf');
-      S.call.yesDraft = { name: fd.get('name'), email: fd.get('email'), phone: fd.get('phone') };
-      S.redrawYes();
-    },
+    'yes-wf': () => { yesDraftFromForm(); S.redrawYes(); },
     copy: (el) => copy(el.dataset.text),
-    'next-after-win': () => { S.onModalClose = null; closeModal(); S.call.leadId = null; startCalling().catch(fail); },
+    'next-after-win': () => { S.onModalClose = null; S.success = null; closeModal(); S.call.leadId = null; startCalling().catch(fail); },
     release: async () => {
       if (!confirm('Give this lead back so someone else can call it?')) return;
       try { await api('POST', `/api/leads/${S.call.lead.id}/release`); toast('↩️ Lead released'); go('mine'); } catch (err) { fail(err); }
@@ -1282,7 +1400,7 @@
     'admin-open': (el) => { S.admin.open = S.admin.open === el.dataset.id ? null : el.dataset.id; viewAdmin(document.getElementById('view')).catch(fail); },
     'deal-paid': (el) => adminAction(`/api/admin/deals/${el.dataset.id}/paid`, '💵 Marked paid. Rep\'s commission is now earned.'),
     'deal-payout': (el) => adminAction(`/api/admin/deals/${el.dataset.id}/payout`, '💸 Commission marked as paid out.'),
-    'deal-resend': (el) => adminAction(`/api/admin/deals/${el.dataset.id}/resend`, '🔁 Re-sent.'),
+    'deal-retry': (el) => { el.disabled = true; el.textContent = '⏳ Retrying…'; adminAction(`/api/admin/deals/${el.dataset.id}/retry`, '🔁 Setup re-run. Check the steps.'); },
     'deal-cancel': (el) => { if (confirm('Cancel this deal? Points and commission will be removed from the rep.')) adminAction(`/api/admin/deals/${el.dataset.id}/cancel`, 'Deal cancelled.'); },
     task: (el) => adminAction(`/api/admin/deals/${el.dataset.deal}/workflow/${el.dataset.wf}`, null, { taskIndex: Number(el.dataset.i), done: el.checked }),
     'wf-live': (el) => adminAction(`/api/admin/deals/${el.dataset.deal}/workflow/${el.dataset.wf}`, '✅ Workflow is live!', { status: 'live' }),
@@ -1312,6 +1430,9 @@
       if (!confirm('Stop sending emails to this lead?')) return;
       try { const r = await api('POST', `/api/leads/${S.call.lead.id}/drip/stop`); S.call.drip = r.drip; drawCall(); toast('🛑 Emails stopped'); } catch (err) { fail(err); }
     },
+    'load-snapshots': async () => {
+      try { const r = await api('GET', '/api/admin/ghl/snapshots'); S.admin.snapshots = r.snapshots; viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
+    },
     'admin-drip-stop': (el) => adminAction(`/api/admin/drips/${el.dataset.id}/stop`, '🛑 Drip stopped'),
     'drip-run': async () => {
       try { const r = await api('POST', '/api/admin/drips/run'); toast(r.reason ? `⏸️ Not sending yet: ${esc(r.reason)}` : `📨 Sent ${r.sent} email${r.sent === 1 ? '' : 's'}`, r.reason ? 'bad' : 'good', 5000); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
@@ -1339,10 +1460,10 @@
         const { token, user } = await api('POST', '/api/setup-first', Object.fromEntries(fd));
         S.token = token; store.set('sb_token', token); S.user = user;
         app.innerHTML = '';
-        S.admin.tab = 'team';
+        S.admin.tab = 'launch';
         location.hash = '#/admin';
         render();
-        setTimeout(() => toast('👋 Welcome! Add your sales reps here, or load the demo team under Settings.', 'gold', 7000), 600);
+        setTimeout(() => toast('👋 Welcome! This checklist shows exactly what to do next, one step at a time.', 'gold', 7000), 600);
       } catch (err) { fail(err); }
     },
     search: (fd) => { S.search.city = String(fd.get('city')).trim(); store.set('sb_city', S.search.city); doSearch(false); },
@@ -1371,6 +1492,9 @@
         toast(r.suppressed ? '📧 Saved. They unsubscribed before, so no emails will go out.' : `📨 Added to the email drip!${r.pointsEarned ? ` <b>+${r.pointsEarned} pts</b>` : ''}`, r.suppressed ? '' : 'gold');
         drawCall();
       } catch (err) { fail(err); }
+    },
+    snapshot: async (fd) => {
+      try { await api('PATCH', '/api/admin/settings', { ghlSnapshotId: fd.get('ghlSnapshotId') }); S.catalog = await api('GET', '/api/catalog'); toast('✅ Template saved. New clients get built from it.', 'good'); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }
     },
     'email-settings': async (fd) => {
       try { await api('PATCH', '/api/admin/settings', Object.fromEntries(fd)); toast('💾 Sender details saved', 'good'); viewAdmin(document.getElementById('view')); } catch (err) { fail(err); }

@@ -12,6 +12,8 @@ const setup = require('./setup');
 const demo = require('./demo');
 const drip = require('./drip');
 const { profitFor } = require('./pricing');
+const provision = require('./provision');
+const { AI_ADDON, TASK_OWNERS } = require('./workflows');
 
 const PUBLIC_DIR = path.join(__dirname, '..', 'public');
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.png': 'image/png', '.ico': 'image/x-icon', '.json': 'application/json', '.webmanifest': 'application/manifest+json' };
@@ -32,6 +34,9 @@ const DEFAULT_SETTINGS = {
   replyTo: '',
   businessAddress: '',
   emailDailyCap: 0, // 0 = provider's free-tier default
+  timezone: 'America/New_York', // used for new client accounts
+  ghlSnapshotId: '', // your GoHighLevel template (picked in Manager → 🚀 Launch)
+  clientLoginUrl: '', // where clients log in, e.g. https://app.yourdomain.com
 };
 
 const AVATARS = ['🦊', '🐺', '🦄', '🐯', '🐼', '🦁', '🐸', '🐙', '🦅', '🐲', '🦈', '🐻', '🐵', '🦉', '🐬', '🚀'];
@@ -54,6 +59,20 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   const googleUsed = () => db.data.usage.google?.[monthKey()] || 0;
   const dripOpts = () => ({ settings: settings(), env, catalog: catalog(), publicUrl: publicUrl(), fetchImpl });
   const runDrips = () => drip.tick(db, { ...dripOpts(), now: now() });
+
+  // One-button setup runs in the background; the rep's screen polls progress.
+  const inflight = new Map();
+  const provisionCtx = (deal) => ({ db, deal, env, settings: settings(), catalog: catalog(), publicUrl: publicUrl(), fetchImpl, webhookUrl: webhookUrl(), save: () => db.save() });
+  function startProvisioning(deal) {
+    if (inflight.has(deal.id)) return inflight.get(deal.id);
+    const p = provision.run(provisionCtx(deal))
+      .then(() => runDrips())
+      .catch((err) => console.error('[provision]', err.message))
+      .finally(() => inflight.delete(deal.id));
+    inflight.set(deal.id, p);
+    return p;
+  }
+  const dealOut = (d) => ({ ...setup.publicDeal(d), onboardingUrl: `${publicUrl()}/onboard/${d.onboardingToken}` });
 
   function catalog() {
     return WORKFLOWS.map((w) => {
@@ -171,6 +190,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       paymentUrl: deal.paidAt ? '' : deal.paymentUrl,
       paid: Boolean(deal.paidAt),
       submitted: Boolean(deal.onboarding),
+      loginUrl: deal.ghl?.userId && settings().clientLoginUrl ? settings().clientLoginUrl : '',
       fields,
     };
   }, { public: true });
@@ -192,6 +212,8 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     }
     db.save();
     deal.webhook = await setup.sendWebhook({ url: webhookUrl(), secret: env.WEBHOOK_SECRET, event: 'onboarding.completed', deal, publicUrl: publicUrl(), fetchImpl });
+    // Push their answers into their GoHighLevel account + AI receptionist.
+    if (deal.provisioning) await provision.syncOnboarding(provisionCtx(deal)).catch((err) => console.error('[onboarding sync]', err.message));
     db.save();
     return { ok: true };
   }, { public: true });
@@ -237,6 +259,9 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     // Reps see market prices (to show the savings) but not our internal costs.
     workflows: catalog().filter((w) => w.enabled).map(({ cost, ...w }) => w),
     bundles: BUNDLES,
+    aiAddon: { monthly: AI_ADDON.monthly },
+    taskOwners: TASK_OWNERS,
+    connected: provision.connected(env, settings()),
     objections: UNIVERSAL_OBJECTIONS,
     opener: OPENER,
     industries: INDUSTRIES,
@@ -423,30 +448,34 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     const email = String(body.contact?.email || '').trim();
     if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) throw new HttpError(400, 'That email doesn\'t look right.');
     const rep = db.users.find((u) => u.id === lead.repId) || user;
-    const deal = setup.buildDeal({ lead, rep, workflows, contact: body.contact, notes: body.notes, commissionRate: settings().commissionRate, now: now() });
+    const o = body.options || {};
+    const options = {
+      aiAddons: Array.isArray(o.aiAddons) ? o.aiAddons.map(String) : [],
+      areaCode: String(o.areaCode || '').replace(/\D/g, '').slice(0, 3),
+      createLogin: o.createLogin !== false,
+      paymentLink: o.paymentLink !== false,
+    };
+    const deal = setup.buildDeal({ lead, rep, workflows, contact: body.contact, notes: body.notes, commissionRate: settings().commissionRate, options, now: now() });
     db.deals.push(deal);
     lead.status = 'won';
     lead.lastActivityAt = now();
     lead.history.push({ at: now(), by: user.name, text: `🎉 CLOSED: ${workflows.map((w) => w.name).join(', ')} ($${deal.setupTotal} setup)` });
     addEvent(rep, 'deal', deal.points, { dealId: deal.id, leadId: lead.id, label: `closed ${workflows.map((w) => w.name).join(' + ')} for ${lead.name}` });
-    db.save();
-
-    if (env.STRIPE_SECRET_KEY) {
-      try { deal.paymentUrl = await setup.createStripeCheckout({ deal, secretKey: env.STRIPE_SECRET_KEY, publicUrl: publicUrl(), fetchImpl }); } catch (err) { deal.paymentError = err.message; }
-    }
-    deal.webhook = await setup.sendWebhook({ url: webhookUrl(), secret: env.WEBHOOK_SECRET, event: 'deal.created', deal, publicUrl: publicUrl(), fetchImpl });
     if (deal.contact.email && drip.validEmail(deal.contact.email)) {
       lead.email = deal.contact.email;
       if (deal.contact.name) lead.contactName = deal.contact.name;
       drip.enroll(db, { email: deal.contact.email, name: deal.contact.name, lead, deal, sequence: 'customer', by: rep.id, now: now() });
-      runDrips().catch((err) => console.error('[drip]', err.message));
     }
     db.save();
-    return {
-      deal: setup.publicDeal(deal),
-      onboardingUrl: `${publicUrl()}/onboard/${deal.onboardingToken}`,
-      stats: game.repStats(db, rep.id, settings(), now()),
-    };
+    startProvisioning(deal); // builds everything for the client; the screen shows live progress
+    return { deal: dealOut(deal), onboardingUrl: `${publicUrl()}/onboard/${deal.onboardingToken}`, stats: game.repStats(db, rep.id, settings(), now()) };
+  });
+
+  // Live progress of the one-button setup.
+  route('GET', '/api/deals/:id', ({ params, user }) => {
+    const d = db.deals.find((x) => x.id === params.id);
+    if (!d || (d.repId !== user.id && user.role !== 'manager')) throw new HttpError(404, 'Deal not found.');
+    return { deal: dealOut(d), running: inflight.has(d.id) };
   });
 
   route('GET', '/api/deals/mine', ({ user }) => ({
@@ -482,6 +511,10 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     googleUsed: googleUsed(),
     googleLimit: googleLimit(),
     email: drip.readiness(db, settings(), env),
+    ...Object.fromEntries(Object.entries(provision.connected(env, settings())).map(([k, v]) => [`p_${k}`, v])),
+    reps: db.users.filter((u) => u.role === 'rep' && u.active !== false && !u.demo).length,
+    realDeals: db.deals.filter((d) => !d.demo).length,
+    httpsUrl: /^https:\/\//.test(publicUrl()) && !/localhost|127\.0\.0\.1/.test(publicUrl()),
   });
 
   route('GET', '/api/admin/overview', () => {
@@ -584,14 +617,13 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     return { deal: setup.publicDeal(d) };
   }, { admin: true });
 
-  route('POST', '/api/admin/deals/:id/resend', async ({ params }) => {
+  // Re-runs any setup step that failed or was in practice mode (skips finished ones).
+  route('POST', '/api/admin/deals/:id/retry', async ({ params }) => {
     const d = dealById(params.id);
-    d.webhook = await setup.sendWebhook({ url: webhookUrl(), secret: env.WEBHOOK_SECRET, event: 'deal.created', deal: d, publicUrl: publicUrl(), fetchImpl });
-    if (env.STRIPE_SECRET_KEY && !d.paymentUrl && !d.paidAt) {
-      try { d.paymentUrl = await setup.createStripeCheckout({ deal: d, secretKey: env.STRIPE_SECRET_KEY, publicUrl: publicUrl(), fetchImpl }); d.paymentError = ''; } catch (err) { d.paymentError = err.message; }
-    }
-    db.save();
-    return { deal: setup.publicDeal(d) };
+    if (d.status === 'cancelled') throw new HttpError(400, 'This deal was cancelled.');
+    d.provisioning = d.provisioning || { steps: [] };
+    await startProvisioning(d);
+    return { deal: dealOut(d) };
   }, { admin: true });
 
   route('PATCH', '/api/admin/settings', ({ body }) => {
@@ -612,6 +644,17 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
       const v = String(body[k]).trim();
       if (v && !drip.validEmail(v)) throw new HttpError(400, `${k === 'fromEmail' ? 'Sender' : 'Reply-to'} email doesn't look right.`);
       s[k] = v;
+    }
+    if (body.clientLoginUrl != null) {
+      const u = String(body.clientLoginUrl).trim();
+      if (u && !/^https?:\/\//.test(u)) throw new HttpError(400, 'Client login link must start with https://');
+      s.clientLoginUrl = u;
+    }
+    if (body.ghlSnapshotId != null) s.ghlSnapshotId = String(body.ghlSnapshotId).trim().slice(0, 100);
+    if (body.timezone != null) {
+      const tz = String(body.timezone).trim();
+      try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); } catch { throw new HttpError(400, 'Time zone should look like America/New_York.'); }
+      s.timezone = tz;
     }
     if (body.emailDailyCap != null) s.emailDailyCap = Math.max(0, Number.parseInt(body.emailDailyCap, 10) || 0);
 
@@ -646,6 +689,15 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
   }, { admin: true });
 
   route('POST', '/api/admin/demo', () => ({ reps: demo.seedDemo(db, catalog(), settings(), now()) }), { admin: true });
+
+  route('GET', '/api/admin/ghl/snapshots', async () => {
+    if (!provision.connected(env, settings()).ghl) throw new HttpError(400, 'Connect GoHighLevel first (GHL_API_KEY + GHL_COMPANY_ID).');
+    try {
+      return { snapshots: await provision.listSnapshots({ env, fetchImpl, settings: settings() }), selected: env.GHL_SNAPSHOT_ID || settings().ghlSnapshotId };
+    } catch (err) {
+      throw new HttpError(502, `GoHighLevel said: ${err.message}`);
+    }
+  }, { admin: true });
 
   // ---- email drip (manager) ----
   route('GET', '/api/admin/drips', () => {
@@ -749,7 +801,7 @@ function createApp({ db, env = process.env, fetchImpl = fetch, now = () => Date.
     });
   }
 
-  return { handle, catalog, settings, runDrips };
+  return { handle, catalog, settings, runDrips, waitForProvisioning: (dealId) => inflight.get(dealId) || Promise.resolve() };
 }
 
 function readBody(req) {

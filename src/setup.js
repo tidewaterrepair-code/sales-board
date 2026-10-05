@@ -13,12 +13,22 @@ const crypto = require('node:crypto');
 const { id } = require('./db');
 const { dealPoints, round2 } = require('./game');
 const { reviewLinkFor } = require('./leads');
+const { AI_ADDON } = require('./workflows');
 
 const DAY = 86400000;
 
-function buildDeal({ lead, rep, workflows, contact, notes, commissionRate, now = Date.now() }) {
+// options (picked by the rep in the YES screen):
+//   aiAddons:    workflow ids where the client added the AI upgrade
+//   areaCode:    area code for any new phone number we buy for them
+//   createLogin: give the owner their own login to the client app
+//   paymentLink: send a Stripe payment link (otherwise billed another way)
+function buildDeal({ lead, rep, workflows, contact, notes, commissionRate, options = {}, now = Date.now() }) {
+  const aiAddons = new Set((options.aiAddons || []).filter((wid) => workflows.some((w) => w.id === wid && w.ai === 'optional')));
+  const monthlyOf = (w) => w.monthlyFee + (aiAddons.has(w.id) ? AI_ADDON.monthly : 0);
   const setupTotal = workflows.reduce((s, w) => s + w.setupFee, 0);
-  const monthlyTotal = workflows.reduce((s, w) => s + w.monthlyFee, 0);
+  const monthlyTotal = workflows.reduce((s, w) => s + monthlyOf(w), 0);
+  const digits = String(contact?.phone || lead.phone || '').replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  const areaCode = /^\d{3}$/.test(String(options.areaCode || '')) ? String(options.areaCode) : digits.slice(0, 3);
   const speed = Boolean(lead.claimedAt && now - lead.claimedAt <= DAY);
   const points = dealPoints({ setupTotal, workflowCount: workflows.length, speed });
   return {
@@ -47,10 +57,19 @@ function buildDeal({ lead, rep, workflows, contact, notes, commissionRate, now =
       name: w.name,
       emoji: w.emoji,
       setupFee: w.setupFee,
-      monthlyFee: w.monthlyFee,
+      monthlyFee: monthlyOf(w),
+      aiAddon: aiAddons.has(w.id),
       status: 'queued',
-      tasks: w.setupTasks.map((label) => ({ label, done: false })),
+      tasks: w.setupTasks.map((t) => ({ label: t.label, by: t.by, done: false })),
     })),
+    options: {
+      areaCode: /^\d{3}$/.test(areaCode) ? areaCode : '',
+      createLogin: options.createLogin !== false,
+      paymentLink: options.paymentLink !== false,
+    },
+    provisioning: { status: 'running', steps: [], startedAt: now, finishedAt: null },
+    ghl: {},
+    retell: {},
     setupTotal,
     monthlyTotal,
     commissionRate,

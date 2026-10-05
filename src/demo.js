@@ -56,6 +56,7 @@ function seedDemo(db, catalog, settings, now = Date.now()) {
         const wfs = analysis.recommended.slice(0, count).map((wid) => catalog.find((w) => w.id === wid)).filter(Boolean);
         const deal = buildDeal({ lead, rep, workflows: wfs, contact: { name: 'Owner', email: '', phone: raw.phone }, notes: 'Demo deal', commissionRate: settings.commissionRate, now: createdAt });
         deal.demo = true;
+        deal.provisioning = { status: 'done', steps: [{ key: 'deal', label: 'Deal saved + your commission locked in', status: 'done', detail: 'Demo deal' }], startedAt: createdAt, finishedAt: createdAt };
         if (day > 2 && rand() < 0.8) { deal.status = 'paid'; deal.commissionStatus = 'earned'; deal.paidAt = createdAt + 86400000; }
         if (day > 8 && rand() < 0.5) { deal.commissionStatus = 'paid_out'; deal.status = 'live'; deal.workflows.forEach((w) => { w.status = 'live'; w.tasks.forEach((t) => { t.done = true; }); }); }
         db.deals.push(deal);

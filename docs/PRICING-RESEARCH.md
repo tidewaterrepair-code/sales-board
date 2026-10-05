@@ -48,10 +48,13 @@ These are estimates from public pricing pages and industry write-ups. Real price
 | Twilio SMS | ~$0.011 per text including carrier fees. Local number $1.15/mo | [Twilio pricing](https://www.twilio.com/en-us/sms/pricing), [Twilio cost breakdown](https://textbee.dev/blog/twilio-pricing-real-cost-breakdown) |
 | A2P 10DLC registration (required to text US numbers) | Brand $4.50–$46 one-time + campaign $10–$15/mo | [Twilio cost breakdown](https://textbee.dev/blog/twilio-pricing-real-cost-breakdown) |
 | AI voice (Retell / Vapi) | ~$0.10–$0.31 per minute all-in. We assume ~$0.15 × 600 min = ~$90/mo | [Fora Soft](https://www.forasoft.com/blog/article/vapi-vs-retell-vs-custom), [Macha](https://www.getmacha.com/blog/retell-ai-vs-vapi) |
-| GoHighLevel (fulfillment platform) | $97/mo (3 clients) or $297/mo (unlimited) | [Apexure](https://www.apexure.com/blog/gohighlevel-pricing) |
+| GoHighLevel (fulfillment platform) | **$497/mo Agency Pro**. It's the only plan that lets SalesBoard create client accounts automatically (the one button). $97/$297 plans work only if your team builds accounts by hand | [Apexure](https://www.apexure.com/blog/gohighlevel-pricing), [GoHighLevel API docs](https://marketplace.gohighlevel.com/docs/ghl/locations/create-location/) |
+| Retell phone numbers | Small monthly fee per number + per-minute usage | Retell dashboard |
 | Stripe | 2.9% + 30¢ per card payment, no monthly fee | [Stripe fee guide](https://dodopayments.com/blogs/stripe-fees-calculator) |
 | Labor | $40/hour for setup work | Estimate. Change it to your real rate |
 
-**Fixed cost:** a GoHighLevel Unlimited plan ($297/mo) runs every client. With ~$155/mo average profit per live workflow, **about 2 live workflows cover it**. Everything after that is profit. Monthly costs above include a per-client platform share.
+**Fixed cost:** the GoHighLevel Agency Pro plan ($497/mo) runs every client and powers the one-button setup. With ~$155/mo average profit per live workflow, **about 4 live workflows cover it**. Everything after that is profit. Monthly costs above include a per-client platform share.
+
+**AI upgrade:** workflows marked "No AI needed (AI add-on)" can add the AI upgrade for **+$47/mo** (our cost about $12/mo). It's monthly only, so it doesn't change the rep's setup commission.
 
 **AI Receptionist:** the price includes up to 600 call minutes a month. Heavy users (500+ calls/month) should go on a higher tier so voice minutes don't eat the margin.

@@ -93,7 +93,8 @@
 
     function thanks(d, stillNeedsPay) {
       root.innerHTML = `<div class="card done"><div class="big">🎉</div><h1>You're all set!</h1>
-        <p class="muted">Our team is building your ${d.workflows.length > 1 ? 'workflows' : 'workflow'} now. We'll reach out within one business day.</p>
+        <p class="muted">Your account is set up and we're finishing your ${d.workflows.length > 1 ? 'workflows' : 'workflow'} now. We'll reach out within one business day.</p>
+        ${d.loginUrl ? `<p><a class="btn go" href="${esc(d.loginUrl)}">🔑 Log in to your account</a></p><p class="muted" style="font-size:.85rem">First time? Click "Forgot password" and use your email to set your password.</p>` : ''}
         ${stillNeedsPay && d.paymentUrl ? `<a class="btn pay" href="${esc(d.paymentUrl)}">💳 One last step: pay setup fee</a>` : ''}</div>`;
     }
   })();

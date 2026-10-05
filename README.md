@@ -4,7 +4,7 @@ A fun, competitive sales dashboard built so anyone can use it. Your team uses it
 
 - 🔎 **Find leads**: pick a business type and a city. Leads come straight from Google and are ranked 🔥 hottest first (no website, few reviews, low rating…).
 - 📞 **Call mode**: a personalized teleprompter script (Open → Hook → Ask → Pitch → Close), one-tap objection answers and a live ROI calculator.
-- 🎉 **One-button setup**: when the lead says yes, the rep hits **THEY SAID YES** → **SET IT ALL UP**. That one button creates the deal, the Stripe payment link, the client onboarding form and the fulfillment checklist, and fires your automation webhook.
+- 🎉 **One-button setup**: when the lead says yes, the rep presses **THEY SAID YES**, ticks what the client agreed to (plus the AI upgrade, phone area code, login and payment options) and presses **SET IT ALL UP**. SalesBoard then builds everything while the rep watches: a Stripe payment link, the client's **GoHighLevel sub-account from your template** with their details filled in and only their workflows switched on, the owner's login, an **AI receptionist in Retell with a local phone number**, and a welcome email with their setup form. When the client submits the form, their answers flow into GoHighLevel and the AI automatically.
 - 🏆 **Leaderboard**: points, levels (Rookie → Legend), badges, streaks, a weekly contest, a live "who just closed" ticker with sound and confetti.
 - 💰 **Commission**: reps get **10% of the setup fee, paid once**, on every deal they close. There's no commission on monthly fees. It's tracked as *pending → earned (client paid) → paid out*.
 - 📧 **Email drip**: any lead who gives an email gets automatic follow-ups through Brevo/Resend free tiers.
@@ -24,7 +24,7 @@ docker compose up -d         # or run it with Docker
 Windows: `powershell -ExecutionPolicy Bypass -File install.ps1`
 
 The app opens at **http://localhost:3000**. Press Enter to skip any key, and add them later with `npm run setup`.
-👉 **[docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md)** walks through every free tier (hosting, Google, Brevo, Stripe, Make) step by step.
+👉 **[docs/SETUP-GUIDE.md](docs/SETUP-GUIDE.md)** is the step-by-step walkthrough, written so anyone can follow it: domain → server → Google → email → Stripe → GoHighLevel → Retell → practice close. **[docs/GHL-SNAPSHOT.md](docs/GHL-SNAPSHOT.md)** shows how to build your GoHighLevel template. Inside the app, **Manager → 🚀 Launch** turns green as you finish each step.
 
 1. Create your **manager** account (name + PIN).
 2. **Manager → Team & Payouts**: add each sales rep with a PIN.
@@ -148,7 +148,8 @@ server.js          HTTP server + .env loader
 src/app.js         API routes
 src/workflows.js   the Top 10 catalog, scripts, objections, onboarding fields
 src/leads.js       Google Places search, demo leads, lead scoring
-src/setup.js       one-button setup: deal, Stripe, webhooks
+src/setup.js       deal building, Stripe checkout, signed webhooks
+src/provision.js   one-button setup engine: Stripe → GoHighLevel sub-account + custom values + login → Retell AI receptionist + number → welcome email
 src/drip.js        email drip sequences + Brevo/Resend sending + unsubscribe
 src/pricing.js     profit math (setup commission is one-time, 10%)
 scripts/setup.js   interactive .env wizard (used by install.sh)

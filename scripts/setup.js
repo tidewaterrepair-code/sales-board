@@ -17,14 +17,17 @@ const auto = process.argv.includes('--yes') || !process.stdin.isTTY;
 
 const QUESTIONS = [
   { key: 'PORT', label: 'Port to run on', def: '3000' },
-  { key: 'PUBLIC_URL', label: 'Public web address of this app (used in client links)', def: (env) => `http://localhost:${env.PORT || 3000}`, help: 'Use your real https:// address once it\'s hosted (see docs/SETUP-GUIDE.md, step 1).' },
-  { key: 'GOOGLE_PLACES_API_KEY', label: 'Google Places API key (real leads)', check: /^AIza[\w-]{20,}$/, secret: true, help: 'Guide step 2. Skip it to use practice leads.' },
+  { key: 'PUBLIC_URL', label: 'Public web address of this app (used in client links)', def: (env) => `http://localhost:${env.PORT || 3000}`, help: 'Example: https://board.yourdomain.com (guide Part 4)' },
+  { key: 'GOOGLE_PLACES_API_KEY', label: 'Google Places API key (real leads)', check: /^AIza[\w-]{20,}$/, secret: true, help: 'Guide Part 5. Skip it to use practice leads.' },
   { key: 'GOOGLE_MONTHLY_LIMIT', label: 'Max Google searches per month (1000 = Google\'s free amount)', def: '1000' },
-  { key: 'BREVO_API_KEY', label: 'Brevo API key (email drip, free 300/day)', check: /^xkeysib-/, secret: true, help: 'Guide step 3. Or skip and use Resend below.' },
+  { key: 'BREVO_API_KEY', label: 'Brevo API key (email drip, free 300/day)', check: /^xkeysib-/, secret: true, help: 'Guide Part 6. Starts with xkeysib-' },
   { key: 'RESEND_API_KEY', label: 'Resend API key (alternative to Brevo)', check: /^re_/, secret: true, skipIf: (env) => env.BREVO_API_KEY },
-  { key: 'STRIPE_SECRET_KEY', label: 'Stripe secret key (payment links)', check: /^(sk|rk)_(test|live)_/, secret: true, help: 'Guide step 4. Start with sk_test_ while you practice.' },
+  { key: 'STRIPE_SECRET_KEY', label: 'Stripe secret key (payment links)', check: /^(sk|rk)_(test|live)_/, secret: true, help: 'Guide Part 7. Start with sk_test_ while you practice.' },
   { key: 'STRIPE_WEBHOOK_SECRET', label: 'Stripe webhook signing secret', check: /^whsec_/, secret: true, skipIf: (env) => !env.STRIPE_SECRET_KEY },
-  { key: 'SETUP_WEBHOOK_URL', label: 'Automation webhook URL (Make / Zapier)', check: /^https:\/\//, help: 'Guide step 5. You can also paste it later in Manager → Settings.' },
+  { key: 'GHL_API_KEY', label: 'GoHighLevel Private Integration key (builds client accounts)', check: /^pit-/, secret: true, help: 'Guide Part 8. Starts with pit-' },
+  { key: 'GHL_COMPANY_ID', label: 'GoHighLevel Company ID', skipIf: (env) => !env.GHL_API_KEY, help: 'Guide Part 8. You pick your template (snapshot) inside the app later.' },
+  { key: 'RETELL_API_KEY', label: 'Retell API key (AI receptionists)', check: /^key_/, secret: true, help: 'Guide Part 9.' },
+  { key: 'SETUP_WEBHOOK_URL', label: 'Extra automation webhook URL (optional: Make / Zapier)', check: /^https:\/\//, help: 'Optional. Most people skip this.' },
 ];
 
 function readEnv() {
@@ -91,8 +94,13 @@ async function main() {
   console.log(`   ${on('GOOGLE_PLACES_API_KEY')} Real Google leads${env.GOOGLE_PLACES_API_KEY ? '' : ' (practice leads until you add a key)'}`);
   console.log(`   ${env.BREVO_API_KEY || env.RESEND_API_KEY ? '✅' : '—'} Email drip${env.BREVO_API_KEY || env.RESEND_API_KEY ? ' (also set your sender email + address in Manager → Email Drip)' : ' (emails wait in the queue until you add a key)'}`);
   console.log(`   ${on('STRIPE_SECRET_KEY')} Stripe payment links`);
-  console.log(`   ${on('SETUP_WEBHOOK_URL')} Automation webhook`);
+  console.log(`   ${env.GHL_API_KEY && env.GHL_COMPANY_ID ? '✅' : '—'} GoHighLevel client accounts`);
+  console.log(`   ${on('RETELL_API_KEY')} AI receptionists`);
+  console.log(`   ${on('SETUP_WEBHOOK_URL')} Extra automation webhook`);
   console.log('   ✅ Webhook signing secret (auto-generated)\n');
+  console.log('   Restart SalesBoard so it picks up the changes:');
+  console.log('     server:   sudo systemctl restart salesboard');
+  console.log('     computer: stop it (Ctrl+C) and run  npm start\n');
 }
 
 main().catch((err) => { console.error(err); process.exit(1); });
